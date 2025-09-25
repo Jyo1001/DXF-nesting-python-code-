@@ -27,6 +27,7 @@ ARC_CHORD_TOL = 0.01    # arc flattening chord tolerance (smaller = more segment
 # Behaviors
 FALLBACK_OPEN_AS_BBOX = True   # if no closed loops, use overall DXF bbox as a rectangle
 ALLOW_ROTATE_90       = True
+ALLOW_MIRROR          = False  # allow mirrored placements (flip across Y axis)
 USE_OBB_CANDIDATE     = True   # try oriented bounding box angles too
 INSUNITS = 1                   # 1=inches, 4=mm (stored in DXF header; advisory only)
 
@@ -42,7 +43,7 @@ NEST_MODE = "bitmap"           # "bitmap" | "shelf" (shelf = simpler fallback)
 PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
 
 # Multi-try randomization (bitmap only)
-SHUFFLE_TRIES = 1
+SHUFFLE_TRIES = 5
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
@@ -442,6 +443,12 @@ def bbox_of_loops(loops: List[Loop]):
 def translate_loop(loop: Loop, dx: float, dy: float) -> Loop:
     return [(x+dx,y+dy) for x,y in loop]
 
+def mirror_loop(loop: Loop) -> Loop:
+    mirrored = [(-x, y) for x, y in loop]
+    minx = min((x for x, _ in mirrored), default=0.0)
+    miny = min((y for _, y in mirrored), default=0.0)
+    return [(x - minx, y - miny) for x, y in mirrored]
+
 def rotate_loop(loop: Loop, theta: float) -> Loop:
     c,s=math.cos(theta), math.sin(theta)
     rot=[(x*c - y*s, x*s + y*c) for x,y in loop]
@@ -490,6 +497,8 @@ def split_outer_and_holes(loops: List[Loop]):
 
 # ---------- Part ----------
 class Part:
+    _uid_counter = 0
+
     def __init__(self, name: str, loops: List[Loop], fallback_bbox: Optional[Tuple[float,float,float,float]]):
         if loops:
             minx,miny,maxx,maxy=bbox_of_loops(loops)
@@ -506,12 +515,21 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
-        self._cand_cache = {}  # angle -> dict(loops, raw, test, shell, pw,ph)
+        self._cand_cache = {}  # (scale, angle, mirror) -> dict(loops, raw, test, shell, pw,ph)
+        self.uid = Part._uid_counter
+        Part._uid_counter += 1
 
-    def oriented(self, theta: float):
+    def oriented(self, theta: float, mirror: bool = False):
         if self.outer is None: return 0.0,0.0,[]
-        if abs(theta)%(2*math.pi) < 1e-12: return self.w,self.h,[self.outer]+self.holes
-        loops_r=[rotate_loop(lp, theta) for lp in [self.outer]+self.holes]
+        loops = [self.outer] + self.holes
+        if mirror:
+            loops = [mirror_loop(lp) for lp in loops]
+        if not mirror and abs(theta)%(2*math.pi) < 1e-12:
+            return self.w,self.h,loops
+        if abs(theta)%(2*math.pi) < 1e-12:
+            loops_r = loops
+        else:
+            loops_r=[rotate_loop(lp, theta) for lp in loops]
         minx,miny,maxx,maxy=bbox_of_loops([loops_r[0]])
         return (maxx-minx),(maxy-miny),loops_r
 
@@ -538,6 +556,20 @@ class Part:
             if all(abs((a-b)%(math.pi))>math.radians(1) for b in out):
                 out.append(a)
         return out
+
+    def candidate_poses(self):
+        angles = self.candidate_angles()
+        mirrors = [False, True] if ALLOW_MIRROR else [False]
+        seen = set()
+        poses = []
+        for mirror in mirrors:
+            for ang in angles:
+                key = (mirror, round((ang % (2*math.pi)), 10))
+                if key in seen:
+                    continue
+                seen.add(key)
+                poses.append((ang, mirror))
+        return poses
 
 # ---------- Bitmap helpers ----------
 def _empty_mask(w:int, h:int):
@@ -706,17 +738,18 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     for p in ordered_parts:
         placed = False
-        for ang in p.candidate_angles():
-            if ang not in p._cand_cache:
-                w,h,loops = p.oriented(ang)
+        for ang, mirror in p.candidate_poses():
+            key = (scale, ang, mirror)
+            if key not in p._cand_cache:
+                w,h,loops = p.oriented(ang, mirror)
                 raw, pw, ph = rasterize_loops(loops, scale)               # outer minus holes
                 test = dilate_mask(raw, pw, ph, r_px)                      # spacing test
                 if not ALLOW_NEST_IN_HOLES:
                     shell, _, _ = rasterize_outer_only(loops, scale)       # outer only
                 else:
                     shell = raw
-                p._cand_cache[ang] = {'loops':loops,'raw':raw,'test':test,'shell':shell,'pw':pw,'ph':ph}
-            cand = p._cand_cache[ang]
+                p._cand_cache[key] = {'loops':loops,'raw':raw,'test':test,'shell':shell,'pw':pw,'ph':ph}
+            cand = p._cand_cache[key]
             attempt_sheet = sheets_count
             while True:
                 occ_raw, occ_safe, outlist = ensure_sheet()
@@ -752,7 +785,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             # last resort: drop at (0,0) of a fresh sheet
             sheets_count += 1
             occ_raw, occ_safe, outlist = ensure_sheet()
-            w,h,loops = p.oriented(0.0)
+            w,h,loops = p.oriented(0.0, False)
             raw, pw, ph = rasterize_loops(loops, scale)
             shell = rasterize_outer_only(loops, scale)[0] if not ALLOW_NEST_IN_HOLES else raw
             or_mask_inplace(occ_raw, raw, 0, 0)
@@ -773,40 +806,220 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
 
+# ---------- Bitmap order optimization helpers ----------
+def _seq_key(order: List['Part']):
+    return tuple(p.uid for p in order)
+
+
+def _result_is_better(candidate, incumbent):
+    if candidate is None:
+        return False
+    if incumbent is None:
+        return True
+    _, cand_sheets, cand_fill = candidate
+    _, inc_sheets, inc_fill = incumbent
+    if cand_sheets != inc_sheets:
+        return cand_sheets < inc_sheets
+    return cand_fill > inc_fill
+
+
+def _mutate_order(order: List['Part'], rnd: Random) -> List['Part']:
+    n = len(order)
+    if n <= 1:
+        return list(order)
+    op = rnd.random()
+    if n == 2:
+        op = 0.0
+    if op < 0.4:
+        i, j = rnd.sample(range(n), 2)
+        new_order = list(order)
+        new_order[i], new_order[j] = new_order[j], new_order[i]
+        return new_order
+    elif op < 0.75:
+        i, j = rnd.sample(range(n), 2)
+        new_order = list(order)
+        part = new_order.pop(i)
+        new_order.insert(j, part)
+        return new_order
+    else:
+        i, j = sorted(rnd.sample(range(n), 2))
+        if i == j:
+            return list(order)
+        new_order = list(order)
+        new_order[i:j+1] = reversed(new_order[i:j+1])
+        return new_order
+
+
+def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_penalty: int,
+                  progress=None, label="", max_iters: Optional[int] = None):
+    order = list(initial_order)
+    best_order = list(order)
+    best_result = evaluate_fn(best_order, allow_progress=False)
+    current_order = list(order)
+    current_result = best_result
+
+    n = len(order)
+    if n <= 1:
+        return best_order, best_result
+
+    default_iters = max(8, min(24, n + 4))
+    if max_iters is not None:
+        base_iters = max(5, min(default_iters, max_iters))
+    else:
+        base_iters = default_iters
+    temperature = max(1.0, n * 0.4)
+    cooling = 0.9
+    stall_limit = None
+
+    def score(res):
+        if res is None:
+            return float('inf')
+        _, sheets, fill = res
+        return sheets * sheet_penalty - fill
+
+    stall = 0
+    for it in range(1, base_iters + 1):
+        candidate_order = _mutate_order(current_order, rnd)
+        candidate_result = evaluate_fn(candidate_order, allow_progress=False)
+
+        if _result_is_better(candidate_result, current_result):
+            current_order, current_result = candidate_order, candidate_result
+        else:
+            delta = score(candidate_result) - score(current_result)
+            if delta < 0:
+                accept_prob = 1.0
+            else:
+                if temperature <= 0:
+                    accept_prob = 0.0
+                else:
+                    accept_prob = math.exp(-delta / temperature)
+            if accept_prob > rnd.random():
+                current_order, current_result = candidate_order, candidate_result
+
+        if _result_is_better(current_result, best_result):
+            best_order, best_result = list(current_order), current_result
+            if progress:
+                progress(f"{label}Anneal improvement: sheets={best_result[1]}, fill={best_result[2]}")
+            stall = 0
+        else:
+            stall += 1
+
+        if progress and it % max(6, base_iters // 3) == 0:
+            progress(f"{label}Anneal {it}/{base_iters}: best sheets={best_result[1]}, fill={best_result[2]}")
+
+        temperature *= cooling
+        if temperature < 1e-4:
+            temperature = 1e-4
+        if stall_limit is None:
+            stall_limit = max(3, base_iters // 2)
+        if stall >= stall_limit:
+            break
+
+    return best_order, best_result
+
 # ---------- Bitmap multi-try ----------
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None):
-    base = sorted([p for p in parts if p.outer is not None],
-                  key=lambda p: abs(polygon_area(p.outer)),
-                  reverse=True)
+    base = [p for p in parts if p.outer is not None]
+    base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
     rnd = Random(seed) if seed is not None else Random()
-    best = None  # (placements, sheets, fill_pixels)
     total_parts = len(base)
-    for t in range(max(1, tries)):
-        if progress:
-            progress(f"Preparing try {t+1}/{tries}…")
-        ordered = list(base) if t==0 else rnd.sample(base, len(base))
-        placements, sheets, fillpx = pack_bitmap_core(
-            ordered, W, H, spacing, scale,
-            progress=progress,
-            progress_total=total_parts,
-            progress_prefix=f"Try {t+1}/{tries}\n"
-        )
-        if best is None:
-            best = (placements, sheets, fillpx)
-            if progress:
-                progress(f"Try {t+1}: sheets={sheets}, fillpx={fillpx}\n(best so far)")
+
+    if total_parts == 0:
+        return [], 0
+
+    search_scale = scale
+    if scale > 6:
+        search_scale = max(6, scale // 2)
+
+    Wpx = max(1, int(math.ceil(W * scale)))
+    Hpx = max(1, int(math.ceil(H * scale)))
+    sheet_penalty = Wpx * Hpx * 1000
+
+    cache: Dict[Tuple[tuple, int], Tuple[List[dict], int, int]] = {}
+
+    def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale):
+        key = (_seq_key(order), use_scale)
+        if key in cache:
+            return cache[key]
+        if allow_progress and progress:
+            result = pack_bitmap_core(order, W, H, spacing, use_scale,
+                                      progress=progress,
+                                      progress_total=total_parts,
+                                      progress_prefix=prefix)
         else:
-            bp, bs, bf = best
-            better = (sheets < bs) or (sheets == bs and fillpx > bf)
-            if better:
-                best = (placements, sheets, fillpx)
-                if progress:
-                    progress(f"Try {t+1}: sheets={sheets}, fillpx={fillpx}\n(new best)")
+            result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None)
+        cache[key] = result
+        return result
+
+    best_result = None
+    best_order: Optional[List['Part']] = None
+
+    heuristic_orders: List[Tuple[str, List['Part']]] = []
+    heuristic_orders.append(("Area-desc ", list(base)))
+    heuristic_orders.append(("Aspect-desc ", sorted(base, key=lambda p: max(p.w, p.h, p.obb_w, p.obb_h), reverse=True)))
+    heuristic_orders.append(("Tall-first ", sorted(base, key=lambda p: p.h, reverse=True)))
+
+    tries = max(1, tries)
+
+    start_orders: List[Tuple[str, List['Part']]] = []
+    for ho in heuristic_orders:
+        if len(start_orders) >= tries:
+            break
+        start_orders.append(ho)
+    while len(start_orders) < tries:
+        idx = len(start_orders) - len(heuristic_orders) + 1
+        start_orders.append((f"Random {max(1, idx)} ", rnd.sample(base, len(base))))
+
+    attempts = max(1, len(start_orders))
+    anneal_limit = max(4, min(8, total_parts + max(1, tries // 2)))
+    last_start_result = None
+    for t, (label, start_order) in enumerate(start_orders):
+        if progress:
+            progress(f"{label}placement trial {t+1}/{attempts}…")
+
+        start_result = evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n", use_scale=search_scale)
+        last_start_result = start_result
+        if anneal_limit <= 0:
+            order_after, result_after = start_order, start_result
+        else:
+            if t == 0:
+                limit = anneal_limit
+            elif t < len(heuristic_orders):
+                limit = min(3, anneal_limit)
             else:
-                if progress:
-                    progress(f"Try {t+1}: sheets={sheets}, fillpx={fillpx}\n(kept best: sheets={bs}, fillpx={bf})")
-    return best[0], best[1]
+                limit = min(4, anneal_limit)
+            if limit <= 1:
+                order_after, result_after = start_order, start_result
+            else:
+                order_after, result_after = _anneal_order(
+                    start_order,
+                    lambda o, allow_progress=False: evaluate(o, allow_progress, prefix=label, use_scale=search_scale),
+                    rnd,
+                    sheet_penalty,
+                    progress=progress,
+                    label=label,
+                    max_iters=limit
+                )
+
+        final_result = result_after if _result_is_better(result_after, start_result) else start_result
+        final_order = order_after if final_result is result_after else start_order
+
+        if _result_is_better(final_result, best_result):
+            best_result = final_result
+            best_order = final_order
+            if progress:
+                progress(f"{label}New global best: sheets={best_result[1]}, fill={best_result[2]}")
+        elif progress and best_result:
+            progress(f"{label}Result sheets={final_result[1]}, fill={final_result[2]} (best remains sheets={best_result[1]}, fill={best_result[2]})")
+
+    if best_result is None:
+        best_result = last_start_result
+        best_order = start_orders[0][1] if start_orders else base
+
+    final_order = best_order if best_order is not None else base
+    final_result = evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
+    return final_result[0], final_result[1]
 
 # ---------- Shelf fallback ----------
 def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
@@ -819,35 +1032,35 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
         sheet+=1; shelf_y=0.0; shelf_h=0.0; cursor_x=0.0
     for p in parts:
         cands=[]
-        for ang in p.candidate_angles():
-            w,h,_=p.oriented(ang)
-            cands.append((ang,w,h))
+        for ang, mirror in p.candidate_poses():
+            w,h,_=p.oriented(ang, mirror)
+            cands.append((ang, mirror, w, h))
         placed=False
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if cursor_x + w + spacing <= W and shelf_y + max(shelf_h, h + spacing) <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+cursor_x,y+shelf_y) for x,y in lp] for lp in loops]})
                 cursor_x += w + spacing; shelf_h = max(shelf_h, h + spacing)
                 placed=True; break
         if placed: continue
         shelf_y += shelf_h; cursor_x = 0.0; shelf_h = 0.0
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if w + spacing <= W and shelf_y + h + spacing <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+0.0,y+shelf_y) for x,y in lp] for lp in loops]})
                 cursor_x = w + spacing; shelf_h = h + spacing
                 placed=True; break
         if placed: continue
         new_sheet()
         ok=False
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if w + spacing <= W and h + spacing <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+0.0,y+0.0) for x,y in lp] for lp in loops]})
                 cursor_x = w + spacing; shelf_h = h + spacing
                 ok=True; break
         if not ok:
-            _,_,loops = p.oriented(0.0)
+            _,_,loops = p.oriented(0.0, False)
             placements.append({'sheet':sheet,'loops':[[(x,y) for x,y in lp] for lp in loops]})
             cursor_x = p.w + spacing; shelf_h = p.h + spacing
     sheets_used=(max((pl['sheet'] for pl in placements), default=-1))+1
@@ -973,6 +1186,7 @@ def main():
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
     _report_lines.append(f"Skipped DXFs: {skipped}")
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
+    _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
     _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
