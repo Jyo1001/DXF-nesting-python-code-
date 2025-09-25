@@ -515,23 +515,18 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
-        self._cand_cache = {}  # (scale, angle, mirror) -> dict(loops, raw, test, shell, pw,ph)
+
+        self._cand_cache = {}  # (scale, angle) -> dict(loops, raw, test, shell, pw,ph)
         self.uid = Part._uid_counter
         Part._uid_counter += 1
 
-    def oriented(self, theta: float, mirror: bool = False):
+    def oriented(self, theta: float):
         if self.outer is None: return 0.0,0.0,[]
-        loops = [self.outer] + self.holes
-        if mirror:
-            loops = [mirror_loop(lp) for lp in loops]
-        if not mirror and abs(theta)%(2*math.pi) < 1e-12:
-            return self.w,self.h,loops
-        if abs(theta)%(2*math.pi) < 1e-12:
-            loops_r = loops
-        else:
-            loops_r=[rotate_loop(lp, theta) for lp in loops]
+        if abs(theta)%(2*math.pi) < 1e-12: return self.w,self.h,[self.outer]+self.holes
+        loops_r=[rotate_loop(lp, theta) for lp in [self.outer]+self.holes]
         minx,miny,maxx,maxy=bbox_of_loops([loops_r[0]])
         return (maxx-minx),(maxy-miny),loops_r
+
 
     def _axis_align_angles(self):
         a = (-self.obb_theta) % math.pi
@@ -736,12 +731,14 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
     placed_count = 0
     total_parts = progress_total if progress_total is not None else len(ordered_parts)
 
+
     for p in ordered_parts:
         placed = False
-        for ang, mirror in p.candidate_poses():
-            key = (scale, ang, mirror)
+        for ang in p.candidate_angles():
+            key = (scale, ang)
             if key not in p._cand_cache:
-                w,h,loops = p.oriented(ang, mirror)
+                w,h,loops = p.oriented(ang)
+
                 raw, pw, ph = rasterize_loops(loops, scale)               # outer minus holes
                 test = dilate_mask(raw, pw, ph, r_px)                      # spacing test
                 if not ALLOW_NEST_IN_HOLES:
