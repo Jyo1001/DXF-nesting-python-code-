@@ -27,6 +27,7 @@ ARC_CHORD_TOL = 0.01    # arc flattening chord tolerance (smaller = more segment
 # Behaviors
 FALLBACK_OPEN_AS_BBOX = True   # if no closed loops, use overall DXF bbox as a rectangle
 ALLOW_ROTATE_90       = True
+ALLOW_MIRROR          = False  # allow mirrored placements (flip across Y axis)
 USE_OBB_CANDIDATE     = True   # try oriented bounding box angles too
 INSUNITS = 1                   # 1=inches, 4=mm (stored in DXF header; advisory only)
 
@@ -442,6 +443,12 @@ def bbox_of_loops(loops: List[Loop]):
 def translate_loop(loop: Loop, dx: float, dy: float) -> Loop:
     return [(x+dx,y+dy) for x,y in loop]
 
+def mirror_loop(loop: Loop) -> Loop:
+    mirrored = [(-x, y) for x, y in loop]
+    minx = min((x for x, _ in mirrored), default=0.0)
+    miny = min((y for _, y in mirrored), default=0.0)
+    return [(x - minx, y - miny) for x, y in mirrored]
+
 def rotate_loop(loop: Loop, theta: float) -> Loop:
     c,s=math.cos(theta), math.sin(theta)
     rot=[(x*c - y*s, x*s + y*c) for x,y in loop]
@@ -508,6 +515,7 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
+
         self._cand_cache = {}  # (scale, angle) -> dict(loops, raw, test, shell, pw,ph)
         self.uid = Part._uid_counter
         Part._uid_counter += 1
@@ -518,6 +526,7 @@ class Part:
         loops_r=[rotate_loop(lp, theta) for lp in [self.outer]+self.holes]
         minx,miny,maxx,maxy=bbox_of_loops([loops_r[0]])
         return (maxx-minx),(maxy-miny),loops_r
+
 
     def _axis_align_angles(self):
         a = (-self.obb_theta) % math.pi
@@ -542,6 +551,20 @@ class Part:
             if all(abs((a-b)%(math.pi))>math.radians(1) for b in out):
                 out.append(a)
         return out
+
+    def candidate_poses(self):
+        angles = self.candidate_angles()
+        mirrors = [False, True] if ALLOW_MIRROR else [False]
+        seen = set()
+        poses = []
+        for mirror in mirrors:
+            for ang in angles:
+                key = (mirror, round((ang % (2*math.pi)), 10))
+                if key in seen:
+                    continue
+                seen.add(key)
+                poses.append((ang, mirror))
+        return poses
 
 # ---------- Bitmap helpers ----------
 def _empty_mask(w:int, h:int):
@@ -708,12 +731,14 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
     placed_count = 0
     total_parts = progress_total if progress_total is not None else len(ordered_parts)
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
             if key not in p._cand_cache:
                 w,h,loops = p.oriented(ang)
+
                 raw, pw, ph = rasterize_loops(loops, scale)               # outer minus holes
                 test = dilate_mask(raw, pw, ph, r_px)                      # spacing test
                 if not ALLOW_NEST_IN_HOLES:
@@ -757,7 +782,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             # last resort: drop at (0,0) of a fresh sheet
             sheets_count += 1
             occ_raw, occ_safe, outlist = ensure_sheet()
-            w,h,loops = p.oriented(0.0)
+            w,h,loops = p.oriented(0.0, False)
             raw, pw, ph = rasterize_loops(loops, scale)
             shell = rasterize_outer_only(loops, scale)[0] if not ALLOW_NEST_IN_HOLES else raw
             or_mask_inplace(occ_raw, raw, 0, 0)
@@ -1004,35 +1029,35 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
         sheet+=1; shelf_y=0.0; shelf_h=0.0; cursor_x=0.0
     for p in parts:
         cands=[]
-        for ang in p.candidate_angles():
-            w,h,_=p.oriented(ang)
-            cands.append((ang,w,h))
+        for ang, mirror in p.candidate_poses():
+            w,h,_=p.oriented(ang, mirror)
+            cands.append((ang, mirror, w, h))
         placed=False
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if cursor_x + w + spacing <= W and shelf_y + max(shelf_h, h + spacing) <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+cursor_x,y+shelf_y) for x,y in lp] for lp in loops]})
                 cursor_x += w + spacing; shelf_h = max(shelf_h, h + spacing)
                 placed=True; break
         if placed: continue
         shelf_y += shelf_h; cursor_x = 0.0; shelf_h = 0.0
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if w + spacing <= W and shelf_y + h + spacing <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+0.0,y+shelf_y) for x,y in lp] for lp in loops]})
                 cursor_x = w + spacing; shelf_h = h + spacing
                 placed=True; break
         if placed: continue
         new_sheet()
         ok=False
-        for ang,w,h in cands:
+        for ang, mirror, w, h in cands:
             if w + spacing <= W and h + spacing <= H:
-                _,_,loops = p.oriented(ang)
+                _,_,loops = p.oriented(ang, mirror)
                 placements.append({'sheet':sheet,'loops':[[(x+0.0,y+0.0) for x,y in lp] for lp in loops]})
                 cursor_x = w + spacing; shelf_h = h + spacing
                 ok=True; break
         if not ok:
-            _,_,loops = p.oriented(0.0)
+            _,_,loops = p.oriented(0.0, False)
             placements.append({'sheet':sheet,'loops':[[(x,y) for x,y in lp] for lp in loops]})
             cursor_x = p.w + spacing; shelf_h = p.h + spacing
     sheets_used=(max((pl['sheet'] for pl in placements), default=-1))+1
@@ -1158,6 +1183,7 @@ def main():
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
     _report_lines.append(f"Skipped DXFs: {skipped}")
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
+    _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
     _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
