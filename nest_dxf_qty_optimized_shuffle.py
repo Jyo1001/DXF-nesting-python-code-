@@ -66,6 +66,13 @@ BITMAP_DEVICE = None  # type: Optional[str]
 # lets the script auto-detect the CPU count once ``os`` is available.
 BITMAP_EVAL_WORKERS = None
 
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
 
 
 # Multi-try randomization (bitmap only)
@@ -73,8 +80,6 @@ SHUFFLE_TRIES = 5
 
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
-
-
 
 import os, math
 
@@ -88,6 +93,7 @@ from random import Random
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
 
 
 
@@ -292,6 +298,34 @@ _report_lines: List[str] = []
 def log(line: str):
     print(line)
     _report_lines.append(line)
+
+
+def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
+    """Persist the accumulated log/report lines.
+
+    The report normally lives alongside the DXFs, but if that directory is
+    unavailable we fall back to the script directory so errors are still
+    captured when the script exits early.
+    """
+
+    target_dir = folder if folder and os.path.isdir(folder) else os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(target_dir, "nest_report.txt")
+
+    payload: List[str] = ["=== Nesting Report ==="]
+    payload.extend(_report_lines)
+    if extra_lines:
+        if payload and payload[-1] != "":
+            payload.append("")
+        payload.extend(extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(payload) + "\n")
+    except Exception as exc:
+        print(f"[WARN] Could not write report: {exc}")
+        return None
+
+    return report_path
 
 
 def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
@@ -816,6 +850,7 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
 # ---------- Packer: Bitmap core (exact spacing + 1px safety) ----------
 
 
+
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional['TorchMaskOps'] = None):
@@ -848,10 +883,12 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
 
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
+
 
 
             if key not in p._cand_cache:
@@ -897,6 +934,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     loops_t = [[(x + x_units, y + y_units) for (x,y) in lp] for lp in cand['loops']]
                     outlist.append({'sheet': sheets_count, 'loops': loops_t})
 
+
                     placed = True
                     placed_count += 1
                     if progress:
@@ -913,6 +951,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
 
 
 
@@ -951,6 +990,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
+
 
 
 
@@ -1068,9 +1108,11 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
 # ---------- Bitmap multi-try ----------
 
 
+
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None,
                       mask_ops: Optional['TorchMaskOps'] = None):
+
 
 
     base = [p for p in parts if p.outer is not None]
@@ -1098,6 +1140,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         if allow_progress and progress:
 
 
+
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
@@ -1105,6 +1148,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                                       mask_ops=mask_ops)
         else:
             result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None, mask_ops=mask_ops)
+
 
 
         cache[key] = result
@@ -1258,6 +1302,7 @@ def write_r12_dxf(path, sheets, W, H, placements, margin):
 
 # ---------- main ----------
 def main():
+
     prog = WinProgress("Nesting DXF… Please wait", 480, 220)
     prog.create()
 
@@ -1283,6 +1328,7 @@ def main():
         prog.update(msg)
         _write_report(FOLDER, ["Status: failed (invalid sheet margin)"])
         prog.close(); return
+
 
     parts: List[Part] = []
     skipped = 0
@@ -1312,6 +1358,7 @@ def main():
         qty = read_qty_for_dxf(FOLDER, fn)
         for _ in range(qty):
             parts.append(p)
+
 
 
 
@@ -1404,6 +1451,7 @@ def main():
     except: pass
 
 
+
 if __name__ == "__main__":
     import argparse
 
@@ -1481,6 +1529,11 @@ if __name__ == "__main__":
         help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1514,6 +1567,7 @@ if __name__ == "__main__":
     )
 
 
+
     args = parser.parse_args()
 
     FOLDER = os.path.abspath(args.folder)
@@ -1533,4 +1587,5 @@ if __name__ == "__main__":
     RECT_ALIGN_MODE = args.rect_align
 
     main()
+
 
