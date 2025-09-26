@@ -1,4 +1,3 @@
-
 """GPU-accelerated bitmap helpers for the DXF nesting engine."""
 from __future__ import annotations
 

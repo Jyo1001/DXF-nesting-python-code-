@@ -16,6 +16,7 @@ python nest_dxf_qty_optimized_shuffle.py --folder "For waterjet cutting" --pixel
 - `--tries` – Number of shuffle trials to explore alternate part orders.
 - `--seed` – Fix the random seed for repeatable runs.
 - `--workers` – Number of worker processes for bitmap evaluation (defaults to auto detection).
+
 - `--allow-mirror/--no-mirror` – Control whether mirrored placements are explored.
 - `--allow-hole-nesting/--forbid-hole-nesting` – Toggle part-in-hole placement.
 - `--nest-mode` – Choose between the bitmap searcher and the simpler shelf fallback.
