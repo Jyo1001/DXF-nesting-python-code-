@@ -55,40 +55,32 @@ BITMAP_EVAL_WORKERS = None
 # Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
 BITMAP_DEVICE = None  # type: Optional[str]
 
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+
+
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
 
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
+
 import os, math
-from typing import List, Tuple, Dict, Optional, Any, TYPE_CHECKING
+
+from typing import List, Tuple, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
 
-GPU_BACKEND_ERROR: Optional[Exception] = None
-
-try:
-    from gpu_bitmap import build_mask_ops, cuda_available
-except Exception as exc:  # pragma: no cover - optional dependency
-    GPU_BACKEND_ERROR = exc
-
-    def build_mask_ops(_device: Optional[str] = None) -> Optional['TorchMaskOps']:
-        return None
-
-    def cuda_available() -> bool:
-        return False
-else:
-    GPU_BACKEND_ERROR = None
-
-if TYPE_CHECKING:
-    from gpu_bitmap import TorchMaskOps
-
 # Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
 # up the repository assets without having to edit the script manually.
+
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
 
 if not BITMAP_EVAL_WORKERS:
     cpu_count = os.cpu_count() or 1
@@ -785,6 +777,7 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
                         occ[yy][xx] = 1
 
 # ---------- Packer: Bitmap core (exact spacing + 1px safety) ----------
+
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional['TorchMaskOps'] = None):
@@ -815,10 +808,12 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
 
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
+
             if key not in p._cand_cache:
                 w,h,loops = p.oriented(ang)
 
@@ -861,6 +856,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     y_units = ypx / scale
                     loops_t = [[(x + x_units, y + y_units) for (x,y) in lp] for lp in cand['loops']]
                     outlist.append({'sheet': sheets_count, 'loops': loops_t})
+
                     placed = True
                     placed_count += 1
                     if progress:
@@ -877,6 +873,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
 
         if not placed:
             # last resort: drop at (0,0) of a fresh sheet
@@ -913,6 +910,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
+
 
 # ---------- Bitmap order optimization helpers ----------
 def _seq_key(order: List['Part']):
@@ -1026,9 +1024,11 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
     return best_order, best_result
 
 # ---------- Bitmap multi-try ----------
+
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None,
                       mask_ops: Optional['TorchMaskOps'] = None):
+
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
     rnd = Random(seed) if seed is not None else Random()
@@ -1052,6 +1052,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         if key in cache:
             return cache[key]
         if allow_progress and progress:
+
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
@@ -1059,6 +1060,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                                       mask_ops=mask_ops)
         else:
             result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None, mask_ops=mask_ops)
+
         cache[key] = result
         return result
 
@@ -1258,13 +1260,11 @@ def main():
         for _ in range(qty):
             parts.append(p)
 
+
     if not parts:
         log("[WARN] Nothing to nest (no usable profiles).")
         prog.update("Nothing to nest.\nNo usable closed profiles were found.")
         prog.close(); return
-
-    if GPU_BACKEND_ERROR is not None:
-        log(f"[WARN] GPU helpers unavailable ({GPU_BACKEND_ERROR.__class__.__name__}: {GPU_BACKEND_ERROR}). Running on CPU bitmaps.")
 
     mask_ops: Optional['TorchMaskOps'] = None
     accel_note = "Acceleration: CPU bitmap evaluator"
@@ -1302,6 +1302,7 @@ def main():
     else:
         placements, sheets = pack_shelves(parts, W_eff, H_eff, SPACING)
 
+
     if sheets <= 0:
         log("[WARN] Parts exist, but none fit on the sheet.")
         prog.update("Parts exist, but none fit on the sheet.")
@@ -1322,6 +1323,7 @@ def main():
 
     _report_lines.append(f"Spacing: {SPACING}")
     _report_lines.append(f"Resolution: {PIXELS_PER_UNIT} px/unit")
+
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
     _report_lines.append(f"Skipped DXFs: {skipped}")
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
@@ -1331,6 +1333,7 @@ def main():
     if using_cuda:
         _report_lines.append("GPU acceleration engaged: NVIDIA CUDA device utilized for bitmap placement.")
     _report_lines.append("")
+
 
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
@@ -1413,6 +1416,11 @@ if __name__ == "__main__":
         help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1455,8 +1463,10 @@ if __name__ == "__main__":
     PIXELS_PER_UNIT = max(1, int(args.pixels_per_unit))
     SHUFFLE_TRIES = max(1, int(args.tries))
     SHUFFLE_SEED = args.seed
+
     BITMAP_EVAL_WORKERS = args.workers
     BITMAP_DEVICE = args.device
+
     ALLOW_MIRROR = args.allow_mirror
     ALLOW_NEST_IN_HOLES = args.allow_holes
     RECT_ALIGN_MODE = args.rect_align
