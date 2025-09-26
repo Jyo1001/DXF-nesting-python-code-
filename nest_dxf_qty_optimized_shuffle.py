@@ -52,8 +52,7 @@ PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
 # lets the script auto-detect the CPU count once ``os`` is available.
 BITMAP_EVAL_WORKERS = None
 
-# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
-BITMAP_DEVICE = None  # type: Optional[str]
+
 
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
@@ -62,17 +61,14 @@ SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
 import os, math
-from typing import List, Tuple, Dict, Optional, Any, TYPE_CHECKING
+
+from typing import List, Tuple, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
 
-from gpu_bitmap import build_mask_ops, cuda_available
-
-if TYPE_CHECKING:
-    from gpu_bitmap import TorchMaskOps
-
 # Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
 # up the repository assets without having to edit the script manually.
+
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
