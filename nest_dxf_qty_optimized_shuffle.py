@@ -73,6 +73,13 @@ BITMAP_DEVICE = None  # type: Optional[str]
 # lets the script auto-detect the CPU count once ``os`` is available.
 BITMAP_EVAL_WORKERS = None
 
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
 
 
 # Multi-try randomization (bitmap only)
@@ -80,6 +87,7 @@ SHUFFLE_TRIES = 5
 
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
+
 
 import os, math
 
@@ -93,6 +101,7 @@ from random import Random
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
 
 
 
@@ -287,17 +296,68 @@ if IS_WINDOWS:
                 pass
 else:
     class WinProgress:
-        def __init__(self, *_, **__): self.enabled=False
-        def create(self): pass
-        def update(self, _): pass
-        def pump(self): pass
-        def close(self): pass
+        """Console-friendly progress reporter used on non-Windows hosts."""
+
+        def __init__(self, title: str = "Nesting DXF…", *_: object, **__: object) -> None:
+            self.enabled = True
+            self._last_line: Optional[str] = None
+            self.title = title
+
+        def create(self) -> None:
+            if not self.enabled:
+                return
+            banner = f"=== {self.title} ==="
+            print(banner)
+            self._last_line = banner
+
+        def update(self, text: str) -> None:
+            if not self.enabled:
+                return
+            if text == self._last_line:
+                return
+            print(text)
+            self._last_line = text
+
+        def pump(self) -> None:  # pragma: no cover - no-op for console fallback
+            return
+
+        def close(self) -> None:
+            self.enabled = False
+
 
 # --------- simple logger ----------
 _report_lines: List[str] = []
 def log(line: str):
     print(line)
     _report_lines.append(line)
+
+
+def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
+    """Persist the accumulated log/report lines.
+
+    The report normally lives alongside the DXFs, but if that directory is
+    unavailable we fall back to the script directory so errors are still
+    captured when the script exits early.
+    """
+
+    target_dir = folder if folder and os.path.isdir(folder) else os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(target_dir, "nest_report.txt")
+
+    payload: List[str] = ["=== Nesting Report ==="]
+    payload.extend(_report_lines)
+    if extra_lines:
+        if payload and payload[-1] != "":
+            payload.append("")
+        payload.extend(extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(payload) + "\n")
+    except Exception as exc:
+        print(f"[WARN] Could not write report: {exc}")
+        return None
+
+    return report_path
 
 
 def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
@@ -537,6 +597,14 @@ def polygon_area(loop: Loop) -> float:
         x1,y1=loop[i]; x2,y2=loop[i+1]
         s += x1*y2 - x2*y1
     return 0.5*s
+
+def polygon_perimeter(loop: Loop) -> float:
+    peri = 0.0
+    for i in range(len(loop)-1):
+        x1, y1 = loop[i]
+        x2, y2 = loop[i + 1]
+        peri += math.hypot(x2 - x1, y2 - y1)
+    return peri
 
 def bbox_of_points(pts: List[Point]):
     xs=[p[0] for p in pts]; ys=[p[1] for p in pts]
@@ -851,6 +919,7 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
 
 
 
+
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional['TorchMaskOps'] = None):
@@ -884,10 +953,12 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
 
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
+
 
 
 
@@ -935,6 +1006,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     outlist.append({'sheet': sheets_count, 'loops': loops_t})
 
 
+
                     placed = True
                     placed_count += 1
                     if progress:
@@ -951,6 +1023,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
 
 
 
@@ -990,6 +1063,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
+
 
 
 
@@ -1109,6 +1183,7 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
 
 
 
+
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None,
                       mask_ops: Optional['TorchMaskOps'] = None):
@@ -1117,6 +1192,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
 
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
+
     rnd = Random(seed) if seed is not None else Random()
     total_parts = len(base)
 
@@ -1141,6 +1217,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
 
 
 
+
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
@@ -1151,16 +1228,28 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
 
 
 
+
         cache[key] = result
         return result
 
     best_result = None
     best_order: Optional[List['Part']] = None
+    best_label: Optional[str] = None
+    tested_labels: List[str] = []
+
+    def deepnest_like_key(part: 'Part') -> Tuple[float, float, float, float]:
+        area = abs(polygon_area(part.outer)) if part.outer else 0.0
+        obb_area = max(part.obb_w * part.obb_h, part.w * part.h)
+        fill_ratio = (area / obb_area) if obb_area > 0 else 0.0
+        perimeter = polygon_perimeter(part.outer) if part.outer else 0.0
+        long_side = max(part.w, part.h, part.obb_w, part.obb_h)
+        return (area, fill_ratio, -perimeter, -long_side)
 
     heuristic_orders: List[Tuple[str, List['Part']]] = []
     heuristic_orders.append(("Area-desc ", list(base)))
     heuristic_orders.append(("Aspect-desc ", sorted(base, key=lambda p: max(p.w, p.h, p.obb_w, p.obb_h), reverse=True)))
     heuristic_orders.append(("Tall-first ", sorted(base, key=lambda p: p.h, reverse=True)))
+    heuristic_orders.append(("Deepnest-fit ", sorted(base, key=deepnest_like_key, reverse=True)))
 
     tries = max(1, tries)
 
@@ -1177,6 +1266,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     anneal_limit = max(4, min(8, total_parts + max(1, tries // 2)))
     last_start_result = None
     for t, (label, start_order) in enumerate(start_orders):
+        tested_labels.append(label.strip())
         if progress:
             progress(f"{label}placement trial {t+1}/{attempts}…")
 
@@ -1210,6 +1300,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         if _result_is_better(final_result, best_result):
             best_result = final_result
             best_order = final_order
+            best_label = label.strip()
             if progress:
                 progress(f"{label}New global best: sheets={best_result[1]}, fill={best_result[2]}")
         elif progress and best_result:
@@ -1221,7 +1312,12 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
 
     final_order = best_order if best_order is not None else base
     final_result = evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
-    return final_result[0], final_result[1]
+    stats = {
+        'fill_pixels': final_result[2] if final_result else None,
+        'best_seed': best_label,
+        'tested_orders': tested_labels,
+    }
+    return final_result[0], final_result[1], stats
 
 
 # ---------- Shelf fallback ----------
@@ -1303,6 +1399,7 @@ def write_r12_dxf(path, sheets, W, H, placements, margin):
 # ---------- main ----------
 def main():
 
+
     prog = WinProgress("Nesting DXF… Please wait", 480, 220)
     prog.create()
 
@@ -1328,6 +1425,7 @@ def main():
         prog.update(msg)
         _write_report(FOLDER, ["Status: failed (invalid sheet margin)"])
         prog.close(); return
+
 
 
     parts: List[Part] = []
@@ -1358,6 +1456,7 @@ def main():
         qty = read_qty_for_dxf(FOLDER, fn)
         for _ in range(qty):
             parts.append(p)
+
 
 
 
@@ -1452,6 +1551,7 @@ def main():
 
 
 
+
 if __name__ == "__main__":
     import argparse
 
@@ -1534,6 +1634,11 @@ if __name__ == "__main__":
         help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1568,6 +1673,7 @@ if __name__ == "__main__":
 
 
 
+
     args = parser.parse_args()
 
     FOLDER = os.path.abspath(args.folder)
@@ -1587,5 +1693,6 @@ if __name__ == "__main__":
     RECT_ALIGN_MODE = args.rect_align
 
     main()
+
 
 
