@@ -8,11 +8,13 @@
 # - Draws one border per sheet with configurable margin + gap; saves nested.dxf + nest_report.txt
 # - Shows a tiny progress window (Win32 via ctypes) — no tkinter required
 
+
 # ======= SETTINGS =======
 # NOTE: The folder defaults to the sample DXFs that ship with the repository when
 # available.  On Windows the original absolute path is left as a fallback so the
 # script behaves the same when copied back to its source environment.
 FOLDER = r"C:\Users\Jsudhakaran\OneDrive - GN Corporation Inc\Desktop\test\For waterjet cutting"
+
 
 # Sheet (inches)
 SHEET_W = 48.0
@@ -29,9 +31,13 @@ ARC_CHORD_TOL = 0.01    # arc flattening chord tolerance (smaller = more segment
 
 # Behaviors
 FALLBACK_OPEN_AS_BBOX = True   # if no closed loops, use overall DXF bbox as a rectangle
+
+
 ALLOW_ROTATE_90       = True
 ALLOW_MIRROR          = False  # allow mirrored placements (flip across Y axis)
 USE_OBB_CANDIDATE     = True   # try oriented bounding box angles too
+
+
 INSUNITS = 1                   # 1=inches, 4=mm (stored in DXF header; advisory only)
 
 # Rectangle orientation preference: "off" | "prefer" | "force"
@@ -42,14 +48,14 @@ RECT_ALIGN_TOL  = 1e-3
 ALLOW_NEST_IN_HOLES = True     # True: allow part-in-hole. False: holes are blocked areas.
 
 # Nesting engine
+
 NEST_MODE = "bitmap"           # "bitmap" | "shelf" (shelf = simpler fallback)
+
 PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
-BITMAP_EVAL_WORKERS = None     # None=auto CPU count, 1=disable parallel search
-USE_GPU = None                 # None=auto detect, True=force GPU, False=disable
-GPU_DEVICE = None              # Optional CUDA device name (e.g. "cuda:0")
 
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
+
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
@@ -58,8 +64,6 @@ from typing import List, Tuple, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
 
-from gpu_bitmap import build_mask_ops, cuda_available
-
 # Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
 # up the repository assets without having to edit the script manually.
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
@@ -67,6 +71,7 @@ if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
 
 # ---------- tiny Windows progress window (robust prototypes) ----------
+
 IS_WINDOWS = (os.name == "nt")
 if IS_WINDOWS:
     import ctypes
@@ -476,6 +481,8 @@ def bbox_of_loops(loops: List[Loop]):
     pts=[p for lp in loops for p in lp]
     return bbox_of_points(pts) if pts else (0,0,0,0)
 
+
+
 def translate_loop(loop: Loop, dx: float, dy: float) -> Loop:
     return [(x+dx,y+dy) for x,y in loop]
 
@@ -490,6 +497,8 @@ def rotate_loop(loop: Loop, theta: float) -> Loop:
     rot=[(x*c - y*s, x*s + y*c) for x,y in loop]
     minx=min(x for x,_ in rot); miny=min(y for _,y in rot)
     return [(x-minx,y-miny) for x,y in rot]
+
+
 
 def convex_hull(points: List[Point]) -> List[Point]:
     pts=sorted(set(points))
@@ -532,6 +541,8 @@ def split_outer_and_holes(loops: List[Loop]):
     return loops[idx], [loops[i] for i in range(len(loops)) if i!=idx]
 
 # ---------- Part ----------
+
+
 class Part:
     _uid_counter = 0
 
@@ -540,10 +551,14 @@ class Part:
             minx,miny,maxx,maxy=bbox_of_loops(loops)
             loops0=[translate_loop(lp,-minx,-miny) for lp in loops]
         elif fallback_bbox is not None:
+
+
             minx,miny,maxx,maxy=fallback_bbox
             loops0=[[ (0,0),(maxx-minx,0),(maxx-minx,maxy-miny),(0,maxy-miny),(0,0) ]]
         else:
             loops0=[]
+
+
         self.name=name
         if not loops0:
             self.outer=None; self.holes=[]; self.w=self.h=0.0; self.obb_w=self.obb_h=self.obb_theta=0.0; return
@@ -551,23 +566,20 @@ class Part:
         minx,miny,maxx,maxy=bbox_of_loops([self.outer])
         self.w=maxx-minx; self.h=maxy-miny
         self.obb_w,self.obb_h,self.obb_theta = min_area_rect(self.outer)
-        self._cand_cache = {}  # (scale, angle, mirror) -> dict(loops, raw, test, shell, pw,ph)
+
+        self._cand_cache = {}  # (scale, angle) -> dict(loops, raw, test, shell, pw,ph)
         self.uid = Part._uid_counter
         Part._uid_counter += 1
 
-    def oriented(self, theta: float, mirror: bool = False):
+    def oriented(self, theta: float):
         if self.outer is None: return 0.0,0.0,[]
-        loops = [self.outer] + self.holes
-        if mirror:
-            loops = [mirror_loop(lp) for lp in loops]
-        if not mirror and abs(theta)%(2*math.pi) < 1e-12:
-            return self.w,self.h,loops
-        if abs(theta)%(2*math.pi) < 1e-12:
-            loops_r = loops
-        else:
-            loops_r=[rotate_loop(lp, theta) for lp in loops]
+        if abs(theta)%(2*math.pi) < 1e-12: return self.w,self.h,[self.outer]+self.holes
+        loops_r=[rotate_loop(lp, theta) for lp in [self.outer]+self.holes]
         minx,miny,maxx,maxy=bbox_of_loops([loops_r[0]])
         return (maxx-minx),(maxy-miny),loops_r
+
+
+
 
     def _axis_align_angles(self):
         a = (-self.obb_theta) % math.pi
@@ -606,6 +618,48 @@ class Part:
         clone._cand_cache = {}
         clone.uid = self.uid
         return clone
+
+    def candidate_poses(self):
+        angles = self.candidate_angles()
+        mirrors = [False, True] if ALLOW_MIRROR else [False]
+        seen = set()
+        poses = []
+        for mirror in mirrors:
+            for ang in angles:
+                key = (mirror, round((ang % (2*math.pi)), 10))
+                if key in seen:
+                    continue
+                seen.add(key)
+                poses.append((ang, mirror))
+        return poses
+
+    def clone_for_worker(self) -> 'Part':
+        clone = Part.__new__(Part)
+        clone.name = self.name
+        clone.outer = self.outer
+        clone.holes = self.holes
+        clone.w = self.w
+        clone.h = self.h
+        clone.obb_w = self.obb_w
+        clone.obb_h = self.obb_h
+        clone.obb_theta = self.obb_theta
+        clone._cand_cache = {}
+        clone.uid = self.uid
+        return clone
+
+    def candidate_poses(self):
+        angles = self.candidate_angles()
+        mirrors = [False, True] if ALLOW_MIRROR else [False]
+        seen = set()
+        poses = []
+        for mirror in mirrors:
+            for ang in angles:
+                key = (mirror, round((ang % (2*math.pi)), 10))
+                if key in seen:
+                    continue
+                seen.add(key)
+                poses.append((ang, mirror))
+        return poses
 
     def candidate_poses(self):
         angles = self.candidate_angles()
@@ -786,12 +840,16 @@ def _pack_bitmap_core_cpu(ordered_parts: List['Part'], W: float, H: float, spaci
     placed_count = 0
     total_parts = progress_total if progress_total is not None else len(ordered_parts)
 
+
+
+
     for p in ordered_parts:
         placed = False
-        for ang, mirror in p.candidate_poses():
-            key = (scale, ang, mirror)
+        for ang in p.candidate_angles():
+            key = (scale, ang)
             if key not in p._cand_cache:
-                w,h,loops = p.oriented(ang, mirror)
+                w,h,loops = p.oriented(ang)
+
                 raw, pw, ph = rasterize_loops(loops, scale)               # outer minus holes
                 test = dilate_mask(raw, pw, ph, r_px)                      # spacing test
                 if not ALLOW_NEST_IN_HOLES:
@@ -800,6 +858,8 @@ def _pack_bitmap_core_cpu(ordered_parts: List['Part'], W: float, H: float, spaci
                     shell = raw
                 p._cand_cache[key] = {'loops':loops,'raw':raw,'test':test,'shell':shell,'pw':pw,'ph':ph}
             cand = p._cand_cache[key]
+
+
             attempt_sheet = sheets_count
             while True:
                 occ_raw, occ_safe, outlist = ensure_sheet()
@@ -831,6 +891,8 @@ def _pack_bitmap_core_cpu(ordered_parts: List['Part'], W: float, H: float, spaci
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
+
         if not placed:
             # last resort: drop at (0,0) of a fresh sheet
             sheets_count += 1
@@ -841,6 +903,8 @@ def _pack_bitmap_core_cpu(ordered_parts: List['Part'], W: float, H: float, spaci
             or_mask_inplace(occ_raw, raw, 0, 0)
             or_dilated_mask_inplace(occ_safe, shell, 0, 0, SAFETY_PX)
             outlist.append({'sheet': sheets_count, 'loops': loops})
+
+
             placed_count += 1
             if progress:
                 progress(f"{progress_prefix}Forced place on new sheet {sheets_count+1}\n"
@@ -853,150 +917,10 @@ def _pack_bitmap_core_cpu(ordered_parts: List['Part'], W: float, H: float, spaci
         for row in occ:
             fill_pixels += sum(1 for v in row if v)
 
+
+
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
-
-
-def _pack_bitmap_core_gpu(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
-                          progress=None, progress_total=None, progress_prefix="", ops=None):
-    if ops is None:
-        ops = _get_gpu_ops()
-    if ops is None:
-        raise RuntimeError("GPU mask operations are unavailable")
-
-    Wpx = max(1, int(math.ceil(W * scale)))
-    Hpx = max(1, int(math.ceil(H * scale)))
-    r_px = int(math.ceil(spacing * scale))
-    SAFETY_PX = 1
-
-    sheets_occ_raw = []
-    sheets_occ_safe = []
-    sheets_out = []
-    sheets_count = 0
-
-    def ensure_sheet():
-        nonlocal sheets_count
-        if len(sheets_occ_raw) <= sheets_count:
-            sheets_occ_raw.append(ops.zeros(Hpx, Wpx))
-            sheets_occ_safe.append(ops.zeros(Hpx, Wpx))
-            sheets_out.append([])
-        return sheets_occ_raw[sheets_count], sheets_occ_safe[sheets_count], sheets_out[sheets_count]
-
-    placed_count = 0
-    total_parts = progress_total if progress_total is not None else len(ordered_parts)
-
-    for p in ordered_parts:
-        placed = False
-        for ang, mirror in p.candidate_poses():
-            key = (scale, ang, mirror)
-            if key not in p._cand_cache:
-                w, h, loops = p.oriented(ang, mirror)
-                raw, pw, ph = rasterize_loops(loops, scale)
-                test = dilate_mask(raw, pw, ph, r_px)
-                if not ALLOW_NEST_IN_HOLES:
-                    shell, _, _ = rasterize_outer_only(loops, scale)
-                else:
-                    shell = raw
-                p._cand_cache[key] = {
-                    'loops': loops,
-                    'raw': raw,
-                    'test': test,
-                    'shell': shell,
-                    'pw': pw,
-                    'ph': ph,
-                }
-            cand = p._cand_cache[key]
-            gpu = cand.setdefault('gpu', {})
-            if gpu.get('device') != ops.device:
-                gpu.clear()
-                gpu['device'] = ops.device
-            if 'raw' not in gpu:
-                gpu['raw'] = ops.mask_to_tensor(cand['raw'])
-                gpu['shell'] = ops.mask_to_tensor(cand['shell'])
-                gpu['test'] = ops.mask_to_tensor(cand['test'])
-
-            attempt_sheet = sheets_count
-            while True:
-                occ_raw, occ_safe, outlist = ensure_sheet()
-                pos = ops.find_first_fit(occ_safe, gpu['test'])
-                if pos is not None:
-                    xpx, ypx = pos
-                    ops.or_mask(occ_raw, gpu['raw'], xpx, ypx)
-                    ops.or_dilated(occ_safe, gpu['shell'], xpx, ypx, SAFETY_PX)
-                    x_units = xpx / scale
-                    y_units = ypx / scale
-                    loops_t = [[(x + x_units, y + y_units) for (x, y) in lp] for lp in cand['loops']]
-                    outlist.append({'sheet': sheets_count, 'loops': loops_t})
-                    placed = True
-                    placed_count += 1
-                    if progress:
-                        progress(f"{progress_prefix}Placing parts…\n"
-                                 f"Placed: {placed_count}/{total_parts}\n"
-                                 f"Current sheet: {sheets_count+1}\n"
-                                 f"Part: {os.path.basename(p.name)}")
-                    break
-                else:
-                    sheets_count += 1
-                    if progress:
-                        progress(f"{progress_prefix}Opening new sheet… now {sheets_count+1}\n"
-                                 f"Placed: {placed_count}/{total_parts}")
-                    if sheets_count > attempt_sheet + 25:
-                        break
-            if placed:
-                break
-        if not placed:
-            sheets_count += 1
-            occ_raw, occ_safe, outlist = ensure_sheet()
-            w, h, loops = p.oriented(0.0, False)
-            raw, pw, ph = rasterize_loops(loops, scale)
-            shell = rasterize_outer_only(loops, scale)[0] if not ALLOW_NEST_IN_HOLES else raw
-            raw_t = ops.mask_to_tensor(raw)
-            shell_t = ops.mask_to_tensor(shell)
-            ops.or_mask(occ_raw, raw_t, 0, 0)
-            ops.or_dilated(occ_safe, shell_t, 0, 0, SAFETY_PX)
-            outlist.append({'sheet': sheets_count, 'loops': loops})
-            placed_count += 1
-            if progress:
-                progress(f"{progress_prefix}Forced place on new sheet {sheets_count+1}\n"
-                         f"Placed: {placed_count}/{total_parts}")
-
-    used_sheets = sheets_count + 1 if sheets_out and sheets_out[0] else len(sheets_out)
-    fill_pixels = 0
-    for occ in sheets_occ_raw:
-        fill_pixels += ops.count_true(occ)
-    placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
-    return placements, used_sheets, fill_pixels
-
-
-def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
-                     progress=None, progress_total=None, progress_prefix=""):
-    global _gpu_warned
-
-    should_try_gpu = False
-    if USE_GPU is True:
-        should_try_gpu = True
-    elif USE_GPU is None:
-        should_try_gpu = cuda_available()
-
-    if should_try_gpu:
-        ops = _get_gpu_ops()
-        if ops is not None:
-            try:
-                return _pack_bitmap_core_gpu(ordered_parts, W, H, spacing, scale,
-                                             progress=progress,
-                                             progress_total=progress_total,
-                                             progress_prefix=progress_prefix,
-                                             ops=ops)
-            except Exception as exc:
-                log(f"[WARN] GPU packing failed ({exc}); falling back to CPU path.")
-        elif _gpu_init_failed_reason and not _gpu_warned:
-            log(f"[WARN] GPU acceleration requested but unavailable: {_gpu_init_failed_reason}")
-            _gpu_warned = True
-
-    return _pack_bitmap_core_cpu(ordered_parts, W, H, spacing, scale,
-                                 progress=progress,
-                                 progress_total=progress_total,
-                                 progress_prefix=progress_prefix)
 
 # ---------- Bitmap order optimization helpers ----------
 def _seq_key(order: List['Part']):
@@ -1109,69 +1033,9 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
 
     return best_order, best_result
 
-
-_worker_part_lookup: Dict[int, 'Part'] = {}
-
-
-def _init_bitmap_worker(parts_payload: List['Part']):
-    global _worker_part_lookup
-    _worker_part_lookup = {p.uid: p for p in parts_payload}
-
-
-def _bitmap_try_worker(task):
-    (index, label, order_uids, anneal_limit, search_scale, sheet_penalty,
-     rnd_seed, W, H, spacing) = task
-
-    parts = [_worker_part_lookup[uid] for uid in order_uids]
-    local_cache: Dict[Tuple[tuple, int], Tuple[List[dict], int, int]] = {}
-
-    def evaluate(order: List['Part'], allow_progress: bool = False, prefix: str = ""):
-        key = (_seq_key(order), search_scale)
-        if key in local_cache:
-            return local_cache[key]
-        res = pack_bitmap_core(order, W, H, spacing, search_scale, progress=None)
-        local_cache[key] = res
-        return res
-
-    start_result = evaluate(parts, allow_progress=False)
-
-    if anneal_limit > 1:
-        rnd = Random(rnd_seed)
-        order_after, result_after = _anneal_order(
-            parts,
-            lambda o, allow_progress=False: evaluate(o, allow_progress),
-            rnd,
-            sheet_penalty,
-            progress=None,
-            label=label,
-            max_iters=anneal_limit,
-        )
-    else:
-        order_after, result_after = parts, start_result
-
-    final_result = result_after if _result_is_better(result_after, start_result) else start_result
-    final_order = order_after if final_result is result_after else parts
-
-    def simplify(res):
-        if res is None:
-            return None
-        return (None, res[1], res[2])
-
-    return (
-        index,
-        label,
-        order_uids,
-        [p.uid for p in final_order],
-        simplify(start_result),
-        simplify(final_result),
-    )
-
-
 # ---------- Bitmap multi-try ----------
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None):
-    global _gpu_warned
-
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
     rnd = Random(seed) if seed is not None else Random()
@@ -1189,15 +1053,6 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     sheet_penalty = Wpx * Hpx * 1000
 
     cache: Dict[Tuple[tuple, int], Tuple[List[dict], int, int]] = {}
-
-    gpu_active = False
-    if USE_GPU is True or (USE_GPU is None and cuda_available()):
-        ops = _get_gpu_ops()
-        if ops is not None:
-            gpu_active = True
-        elif _gpu_init_failed_reason and not _gpu_warned:
-            log(f"[WARN] GPU acceleration requested but unavailable: {_gpu_init_failed_reason}")
-            _gpu_warned = True
 
     def evaluate(order: List['Part'], allow_progress: bool, prefix: str = "", use_scale: int = search_scale):
         key = (_seq_key(order), use_scale)
@@ -1234,12 +1089,15 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
 
     attempts = max(1, len(start_orders))
     anneal_limit = max(4, min(8, total_parts + max(1, tries // 2)))
-    parts_by_uid = {p.uid: p for p in base}
-
-    try_configs = []
+    last_start_result = None
     for t, (label, start_order) in enumerate(start_orders):
+        if progress:
+            progress(f"{label}placement trial {t+1}/{attempts}…")
+
+        start_result = evaluate(start_order, allow_progress=False, prefix=f"{label}Try {t+1}/{attempts}\n", use_scale=search_scale)
+        last_start_result = start_result
         if anneal_limit <= 0:
-            limit = 0
+            order_after, result_after = start_order, start_result
         else:
             if t == 0:
                 limit = anneal_limit
@@ -1247,98 +1105,6 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                 limit = min(3, anneal_limit)
             else:
                 limit = min(4, anneal_limit)
-        try_configs.append({
-            'index': t,
-            'label': label,
-            'order': start_order,
-            'limit': max(0, limit),
-        })
-
-    desired_workers = 1
-    if BITMAP_EVAL_WORKERS is None:
-        cpu = os.cpu_count() or 1
-        desired_workers = max(1, min(cpu, attempts))
-    else:
-        try:
-            requested = int(BITMAP_EVAL_WORKERS)
-        except (TypeError, ValueError):
-            requested = 1
-        if requested <= 1:
-            desired_workers = 1
-        else:
-            desired_workers = max(1, min(requested, attempts))
-
-    if gpu_active:
-        desired_workers = 1
-
-    parallel = desired_workers > 1 and attempts > 1
-    last_start_result = None
-
-    if parallel:
-        worker_payload = [parts_by_uid[uid].clone_for_worker() for uid in sorted(parts_by_uid)]
-        best_order_uids: Optional[List[int]] = None
-        worker_results: List[Optional[Tuple[str, List[int], List[int], Optional[Tuple], Optional[Tuple]]]] = [None] * attempts
-
-        log(f"[INFO] Bitmap search using {desired_workers} workers ({attempts} trials @ scale {search_scale}).")
-        if progress:
-            progress(f"Parallel search across {desired_workers} workers ({attempts} trials)…")
-
-        with ProcessPoolExecutor(max_workers=desired_workers,
-                                 initializer=_init_bitmap_worker,
-                                 initargs=(worker_payload,)) as pool:
-            futures = []
-            for cfg in try_configs:
-                order_uids = [p.uid for p in cfg['order']]
-                seed_val = rnd.randrange(2**31 - 1) if cfg['limit'] > 1 else 0
-                label = f"{cfg['label']}Try {cfg['index']+1}/{attempts} "
-                futures.append(pool.submit(
-                    _bitmap_try_worker,
-                    (cfg['index'], label, order_uids, cfg['limit'], search_scale,
-                     sheet_penalty, seed_val, W, H, spacing)
-                ))
-
-            for fut in as_completed(futures):
-                idx, label, start_uids, final_uids, start_res, final_res = fut.result()
-                worker_results[idx] = (label, start_uids, final_uids, start_res, final_res)
-                if _result_is_better(final_res, best_result):
-                    best_result = final_res
-                    best_order_uids = final_uids
-                    if progress:
-                        progress(f"{label}New global best: sheets={best_result[1]}, fill={best_result[2]}")
-                elif progress and best_result:
-                    progress(f"{label}Result sheets={final_res[1]}, fill={final_res[2]} (best remains sheets={best_result[1]}, fill={best_result[2]})")
-
-        if worker_results and worker_results[-1] is not None:
-            last_start_result = worker_results[-1][3]
-
-        if best_result is None and worker_results:
-            # Fallback to the final completed trial's start result if all anneals failed
-            for entry in reversed(worker_results):
-                if entry is not None:
-                    best_result = entry[3]
-                    best_order_uids = entry[1]
-                    break
-
-        if best_result is None:
-            best_order_uids = [p.uid for p in (start_orders[0][1] if start_orders else base)]
-
-        best_order = [parts_by_uid[uid] for uid in best_order_uids] if best_order_uids else list(base)
-    else:
-        suffix = " with GPU acceleration" if gpu_active else ""
-        log(f"[INFO] Bitmap search running sequentially{suffix} ({attempts} trial{'s' if attempts != 1 else ''} @ scale {search_scale}).")
-        for cfg in try_configs:
-            label = cfg['label']
-            start_order = cfg['order']
-            idx = cfg['index']
-            limit = cfg['limit']
-            display_label = f"{label}placement trial {idx+1}/{attempts}…"
-            if progress:
-                progress(display_label)
-
-            start_result = evaluate(start_order, allow_progress=False,
-                                    prefix=f"{label}Try {idx+1}/{attempts}\n", use_scale=search_scale)
-            last_start_result = start_result
-
             if limit <= 1:
                 order_after, result_after = start_order, start_result
             else:
@@ -1352,26 +1118,26 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                     max_iters=limit
                 )
 
-            final_result = result_after if _result_is_better(result_after, start_result) else start_result
-            final_order = order_after if final_result is result_after else start_order
+        final_result = result_after if _result_is_better(result_after, start_result) else start_result
+        final_order = order_after if final_result is result_after else start_order
 
-            if _result_is_better(final_result, best_result):
-                best_result = final_result
-                best_order = final_order
-                if progress:
-                    progress(f"{label}New global best: sheets={best_result[1]}, fill={best_result[2]}")
-            elif progress and best_result:
-                progress(f"{label}Result sheets={final_result[1]}, fill={final_result[2]} (best remains sheets={best_result[1]}, fill={best_result[2]})")
+        if _result_is_better(final_result, best_result):
+            best_result = final_result
+            best_order = final_order
+            if progress:
+                progress(f"{label}New global best: sheets={best_result[1]}, fill={best_result[2]}")
+        elif progress and best_result:
+            progress(f"{label}Result sheets={final_result[1]}, fill={final_result[2]} (best remains sheets={best_result[1]}, fill={best_result[2]})")
 
-        if best_result is None:
-            best_result = last_start_result
-            best_order = start_orders[0][1] if start_orders else base
+    if best_result is None:
+        best_result = last_start_result
+        best_order = start_orders[0][1] if start_orders else base
 
-        best_order = best_order if best_order is not None else list(base)
-
-    final_order = best_order if best_order is not None else list(base)
+    final_order = best_order if best_order is not None else base
     final_result = evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
     return final_result[0], final_result[1]
+
+
 
 # ---------- Shelf fallback ----------
 def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
@@ -1384,6 +1150,8 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
         sheet+=1; shelf_y=0.0; shelf_h=0.0; cursor_x=0.0
     for p in parts:
         cands=[]
+
+
         for ang, mirror in p.candidate_poses():
             w,h,_=p.oriented(ang, mirror)
             cands.append((ang, mirror, w, h))
@@ -1415,6 +1183,8 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
             _,_,loops = p.oriented(0.0, False)
             placements.append({'sheet':sheet,'loops':[[(x,y) for x,y in lp] for lp in loops]})
             cursor_x = p.w + spacing; shelf_h = p.h + spacing
+
+
     sheets_used=(max((pl['sheet'] for pl in placements), default=-1))+1
     return placements, sheets_used
 
@@ -1533,6 +1303,8 @@ def main():
     _report_lines.append(f"Mode: {NEST_MODE}")
     _report_lines.append(f"Sheets: {sheets}")
     _report_lines.append(f"Margin: {SHEET_MARGIN}")
+
+
     _report_lines.append(f"Spacing: {SPACING}")
     _report_lines.append(f"Resolution: {PIXELS_PER_UNIT} px/unit")
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
@@ -1540,15 +1312,8 @@ def main():
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
     _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
     _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
-    if _gpu_ops is not None:
-        gpu_line = f"enabled ({str(_gpu_ops.device)})"
-    elif USE_GPU is False:
-        gpu_line = "disabled"
-    elif _gpu_init_failed_reason:
-        gpu_line = f"requested but unavailable ({_gpu_init_failed_reason})"
-    else:
-        gpu_line = "disabled"
-    _report_lines.append(f"GPU acceleration: {gpu_line}")
+
+
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
             rf.write("\n".join(_report_lines))
@@ -1562,6 +1327,7 @@ def main():
     except: pass
     try: os.startfile(report_path)
     except: pass
+
 
 if __name__ == "__main__":
     import argparse
@@ -1625,23 +1391,6 @@ if __name__ == "__main__":
         help="Number of worker processes used for bitmap evaluation (bitmap mode).",
     )
     parser.add_argument(
-        "--gpu",
-        dest="use_gpu",
-        action="store_true",
-        help="Force GPU acceleration when a CUDA-capable PyTorch build is available.",
-    )
-    parser.add_argument(
-        "--no-gpu",
-        dest="use_gpu",
-        action="store_false",
-        help="Disable GPU acceleration even if CUDA is present.",
-    )
-    parser.add_argument(
-        "--gpu-device",
-        default=GPU_DEVICE,
-        help="Optional CUDA device string (e.g. cuda:0) to target.",
-    )
-    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1674,8 +1423,6 @@ if __name__ == "__main__":
         help="Control rectangle alignment heuristics.",
     )
 
-    parser.set_defaults(use_gpu=USE_GPU)
-
     args = parser.parse_args()
 
     FOLDER = os.path.abspath(args.folder)
@@ -1687,10 +1434,9 @@ if __name__ == "__main__":
     SHUFFLE_TRIES = max(1, int(args.tries))
     SHUFFLE_SEED = args.seed
     BITMAP_EVAL_WORKERS = args.workers
-    USE_GPU = args.use_gpu
-    GPU_DEVICE = args.gpu_device
     ALLOW_MIRROR = args.allow_mirror
     ALLOW_NEST_IN_HOLES = args.allow_holes
     RECT_ALIGN_MODE = args.rect_align
 
     main()
+
