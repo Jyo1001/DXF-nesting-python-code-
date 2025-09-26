@@ -25,3 +25,8 @@ When no folder is provided the script automatically looks for the bundled `For w
 ## Output
 
 The script writes `nested.dxf` and a `nest_report.txt` summary to the working folder on completion.  The report documents the run parameters, sheet usage, and any skipped parts so the resulting layout can be reproduced.
+
+## GPU acceleration
+
+- When PyTorch with CUDA support is available, the bitmap packer automatically switches to the fastest GPU device it can access. Use `--device cuda:0` (or another device string) to explicitly select which GPU should be used, or `--device cpu` to fall back to the CPU implementation.
+- The `nest_report.txt` file records whether a CUDA GPU was engaged, so you can verify that an NVIDIA device handled the workload. This is the preferred path for reducing runtime; DirectX is not required.
