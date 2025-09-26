@@ -55,40 +55,56 @@ BITMAP_EVAL_WORKERS = None
 # Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
 BITMAP_DEVICE = None  # type: Optional[str]
 
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+
+
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
 
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
-import os, math, sys, traceback
-from typing import List, Tuple, Dict, Optional, Any, TYPE_CHECKING
+
+import os, math
+
+from typing import List, Tuple, Dict, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
 
-GPU_BACKEND_ERROR: Optional[Exception] = None
-
-try:
-    from gpu_bitmap import build_mask_ops, cuda_available
-except Exception as exc:  # pragma: no cover - optional dependency
-    GPU_BACKEND_ERROR = exc
-
-    def build_mask_ops(_device: Optional[str] = None) -> Optional['TorchMaskOps']:
-        return None
-
-    def cuda_available() -> bool:
-        return False
-else:
-    GPU_BACKEND_ERROR = None
-
-if TYPE_CHECKING:
-    from gpu_bitmap import TorchMaskOps
-
 # Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
 # up the repository assets without having to edit the script manually.
+
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
+
+
+
 
 if not BITMAP_EVAL_WORKERS:
     cpu_count = os.cpu_count() or 1
@@ -314,6 +330,62 @@ _report_lines: List[str] = []
 def log(line: str):
     print(line)
     _report_lines.append(line)
+
+
+def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
+    """Persist the accumulated log/report lines.
+
+    The report normally lives alongside the DXFs, but if that directory is
+    unavailable we fall back to the script directory so errors are still
+    captured when the script exits early.
+    """
+
+    target_dir = folder if folder and os.path.isdir(folder) else os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(target_dir, "nest_report.txt")
+
+    payload: List[str] = ["=== Nesting Report ==="]
+    payload.extend(_report_lines)
+    if extra_lines:
+        if payload and payload[-1] != "":
+            payload.append("")
+        payload.extend(extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(payload) + "\n")
+    except Exception as exc:
+        print(f"[WARN] Could not write report: {exc}")
+        return None
+
+    return report_path
+
+
+def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
+    """Persist the accumulated log/report lines.
+
+    The report normally lives alongside the DXFs, but if that directory is
+    unavailable we fall back to the script directory so errors are still
+    captured when the script exits early.
+    """
+
+    target_dir = folder if folder and os.path.isdir(folder) else os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(target_dir, "nest_report.txt")
+
+    payload: List[str] = ["=== Nesting Report ==="]
+    payload.extend(_report_lines)
+    if extra_lines:
+        if payload and payload[-1] != "":
+            payload.append("")
+        payload.extend(extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(payload) + "\n")
+    except Exception as exc:
+        print(f"[WARN] Could not write report: {exc}")
+        return None
+
+    return report_path
 
 
 def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
@@ -844,6 +916,10 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
                         occ[yy][xx] = 1
 
 # ---------- Packer: Bitmap core (exact spacing + 1px safety) ----------
+
+
+
+
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional['TorchMaskOps'] = None):
@@ -874,10 +950,18 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
 
 
+
+
+
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
+
+
+
+
             if key not in p._cand_cache:
                 w,h,loops = p.oriented(ang)
 
@@ -920,6 +1004,9 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     y_units = ypx / scale
                     loops_t = [[(x + x_units, y + y_units) for (x,y) in lp] for lp in cand['loops']]
                     outlist.append({'sheet': sheets_count, 'loops': loops_t})
+
+
+
                     placed = True
                     placed_count += 1
                     if progress:
@@ -936,6 +1023,10 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
+
+
+
 
         if not placed:
             # last resort: drop at (0,0) of a fresh sheet
@@ -972,6 +1063,10 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
+
+
+
+
 
 # ---------- Bitmap order optimization helpers ----------
 def _seq_key(order: List['Part']):
@@ -1085,11 +1180,19 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
     return best_order, best_result
 
 # ---------- Bitmap multi-try ----------
+
+
+
+
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None,
                       mask_ops: Optional['TorchMaskOps'] = None):
+
+
+
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
+
     rnd = Random(seed) if seed is not None else Random()
     total_parts = len(base)
 
@@ -1111,6 +1214,10 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
         if key in cache:
             return cache[key]
         if allow_progress and progress:
+
+
+
+
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
@@ -1118,6 +1225,10 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                                       mask_ops=mask_ops)
         else:
             result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None, mask_ops=mask_ops)
+
+
+
+
         cache[key] = result
         return result
 
@@ -1287,9 +1398,10 @@ def write_r12_dxf(path, sheets, W, H, placements, margin):
 
 # ---------- main ----------
 def main():
+
+
     prog = WinProgress("Nesting DXF… Please wait", 480, 220)
     prog.create()
-    log(f"[INFO] Nesting folder: {FOLDER}")
 
     if not os.path.isdir(FOLDER):
         log(f"[ERROR] Folder not found: {FOLDER}")
@@ -1313,6 +1425,8 @@ def main():
         prog.update(msg)
         _write_report(FOLDER, ["Status: failed (invalid sheet margin)"])
         prog.close(); return
+
+
 
     parts: List[Part] = []
     skipped = 0
@@ -1343,17 +1457,14 @@ def main():
         for _ in range(qty):
             parts.append(p)
 
+
+
+
+
     if not parts:
         log("[WARN] Nothing to nest (no usable profiles).")
         prog.update("Nothing to nest.\nNo usable closed profiles were found.")
-        _write_report(FOLDER, [
-            "Status: aborted (no usable profiles)",
-            "Details: DXFs parsed, but no closed loops were available for nesting.",
-        ])
         prog.close(); return
-
-    if GPU_BACKEND_ERROR is not None:
-        log(f"[WARN] GPU helpers unavailable ({GPU_BACKEND_ERROR.__class__.__name__}: {GPU_BACKEND_ERROR}). Running on CPU bitmaps.")
 
     mask_ops: Optional['TorchMaskOps'] = None
     accel_note = "Acceleration: CPU bitmap evaluator"
@@ -1371,121 +1482,75 @@ def main():
             log(f"[INFO] Bitmap accelerator active on {device_desc}.")
         else:
             if device_pref:
-                if device_pref.lower() == "cpu":
-                    log("[INFO] CPU bitmap evaluator selected (Torch acceleration disabled by request).")
-                    accel_note = "Acceleration: CPU bitmap evaluator (requested 'cpu')"
-                else:
-                    log(f"[WARN] Requested Torch device '{device_pref}' is unavailable; using CPU bitmaps.")
+                log(f"[WARN] Requested Torch device '{device_pref}' is unavailable; using CPU bitmaps.")
             elif cuda_available():
                 log("[WARN] CUDA runtime detected but PyTorch is unavailable; using CPU bitmaps.")
 
     prog.update(f"Starting nesting… {len(parts)} parts\nMode: {NEST_MODE}, Tries: {SHUFFLE_TRIES}")
 
-    packing_stats: Dict[str, Any] = {}
-
-    if NEST_MODE.lower() == "bitmap":
-        if SHUFFLE_TRIES > 1:
-            placements, sheets, stats = pack_bitmap_multi(
-                parts,
-                W_eff,
-                H_eff,
-                SPACING,
-                PIXELS_PER_UNIT,
-                SHUFFLE_TRIES,
-                SHUFFLE_SEED,
-                progress=prog.update,
-                mask_ops=mask_ops,
-            )
+    if NEST_MODE.lower()=="bitmap":
+        if SHUFFLE_TRIES>1:
+            placements, sheets = pack_bitmap_multi(parts, W_eff, H_eff, SPACING, PIXELS_PER_UNIT,
+                                                   SHUFFLE_TRIES, SHUFFLE_SEED,
+                                                   progress=prog.update,
+                                                   mask_ops=mask_ops)
         else:
-            placement_tuple = pack_bitmap_core(
-                parts,
-                W_eff,
-                H_eff,
-                SPACING,
-                PIXELS_PER_UNIT,
-                progress=prog.update,
-                progress_total=len(parts),
-                progress_prefix="Single order\n",
-                mask_ops=mask_ops,
-            )
-            placements, sheets, fill_px = placement_tuple
-            stats = {
-                'fill_pixels': fill_px,
-                'best_seed': 'Area-desc',
-                'tested_orders': ['Area-desc'],
-            }
-        packing_stats = stats or {}
+            placements, sheets = pack_bitmap_core(parts, W_eff, H_eff, SPACING, PIXELS_PER_UNIT,
+                                                  progress=prog.update,
+                                                  progress_total=len(parts),
+                                                  mask_ops=mask_ops)[:2]
     else:
         placements, sheets = pack_shelves(parts, W_eff, H_eff, SPACING)
-        packing_stats = {
-            'fill_pixels': None,
-            'best_seed': 'Shelf heuristic',
-            'tested_orders': ['Shelf heuristic'],
-        }
+
 
     if sheets <= 0:
         log("[WARN] Parts exist, but none fit on the sheet.")
         prog.update("Parts exist, but none fit on the sheet.")
-        _write_report(FOLDER, ["Status: aborted (no parts fit on sheet)"])
         prog.close(); return
 
     out = os.path.join(FOLDER, "nested.dxf")
     prog.update(f"Writing output…\n{out}")
     write_r12_dxf(out, sheets, W_eff, H_eff, placements, SHEET_MARGIN)
 
-    fill_pct_line = None
-    fill_pixels = packing_stats.get('fill_pixels') if isinstance(packing_stats, dict) else None
-    if isinstance(fill_pixels, (int, float)) and fill_pixels is not None:
-        pixel_area = (1.0 / (PIXELS_PER_UNIT or 1)) ** 2
-        utilized_area = fill_pixels * pixel_area
-        total_area = W_eff * H_eff * sheets if sheets else 0.0
-        if total_area > 0:
-            utilization = 100.0 * utilized_area / total_area
-            fill_pct_line = f"Utilized area: {utilized_area:.3f} sq units ({utilization:.1f}% of available)"
+    # Write report
+    report_path = os.path.join(FOLDER, "nest_report.txt")
+    _report_lines.insert(0, "=== Nesting Report ===")
+    _report_lines.append("")
+    _report_lines.append(f"Saved: {out}")
+    _report_lines.append(f"Mode: {NEST_MODE}")
+    _report_lines.append(f"Sheets: {sheets}")
+    _report_lines.append(f"Margin: {SHEET_MARGIN}")
 
-    tested_orders = packing_stats.get('tested_orders') if isinstance(packing_stats, dict) else None
-    best_seed = packing_stats.get('best_seed') if isinstance(packing_stats, dict) else None
-    if tested_orders:
-        log(f"[INFO] Order heuristics evaluated: {', '.join(tested_orders)}")
-    if best_seed:
-        log(f"[INFO] Best heuristic seed: {best_seed}")
+    _report_lines.append(f"Spacing: {SPACING}")
+    _report_lines.append(f"Resolution: {PIXELS_PER_UNIT} px/unit")
 
-    extra_lines = [
-        f"Saved: {out}",
-        f"Mode: {NEST_MODE}",
-        f"Sheets: {sheets}",
-        f"Margin: {SHEET_MARGIN}",
-        f"Spacing: {SPACING}",
-        f"Resolution: {PIXELS_PER_UNIT} px/unit",
-        f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}",
-        f"Skipped DXFs: {skipped}",
-        f"Rect-align mode: {RECT_ALIGN_MODE}",
-        f"Allow mirror: {ALLOW_MIRROR}",
-        f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}",
-        accel_note,
-    ]
+    _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
+    _report_lines.append(f"Skipped DXFs: {skipped}")
+    _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
+    _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
+    _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
+    _report_lines.append(accel_note)
     if using_cuda:
-        extra_lines.append("GPU acceleration engaged: NVIDIA CUDA device utilized for bitmap placement.")
-    if best_seed:
-        extra_lines.append(f"Best heuristic seed: {best_seed}")
-    if tested_orders:
-        extra_lines.append(f"Order heuristics evaluated: {', '.join(tested_orders)}")
-    if fill_pct_line:
-        extra_lines.append(fill_pct_line)
-    extra_lines.append("Status: complete")
+        _report_lines.append("GPU acceleration engaged: NVIDIA CUDA device utilized for bitmap placement.")
+    _report_lines.append("")
 
-    report_path = _write_report(FOLDER, extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(_report_lines))
+    except Exception as e:
+        print(f"[WARN] Could not write report: {e}")
 
     prog.update("Done! Opening folder and report…")
     prog.close()
 
-    if report_path:
-        try: os.startfile(FOLDER)
-        except Exception:
-            pass
-        try: os.startfile(report_path)
-        except Exception:
-            pass
+    try: os.startfile(FOLDER)
+    except: pass
+    try: os.startfile(report_path)
+    except: pass
+
+
+
 
 if __name__ == "__main__":
     import argparse
@@ -1554,6 +1619,26 @@ if __name__ == "__main__":
         help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1586,6 +1671,9 @@ if __name__ == "__main__":
         help="Control rectangle alignment heuristics.",
     )
 
+
+
+
     args = parser.parse_args()
 
     FOLDER = os.path.abspath(args.folder)
@@ -1596,28 +1684,15 @@ if __name__ == "__main__":
     PIXELS_PER_UNIT = max(1, int(args.pixels_per_unit))
     SHUFFLE_TRIES = max(1, int(args.tries))
     SHUFFLE_SEED = args.seed
+
     BITMAP_EVAL_WORKERS = args.workers
     BITMAP_DEVICE = args.device
+
     ALLOW_MIRROR = args.allow_mirror
     ALLOW_NEST_IN_HOLES = args.allow_holes
     RECT_ALIGN_MODE = args.rect_align
 
-    exit_code = 0
-    try:
-        main()
-    except Exception as exc:  # pragma: no cover - defensive CLI wrapper
-        exit_code = 1
-        tb = traceback.format_exc()
-        log(f"[ERROR] Unhandled exception: {exc}")
-        sys.stderr.write(tb)
-        extra = ["Status: failed (unexpected error)", "Traceback:"] + tb.rstrip().splitlines()
-        _write_report(FOLDER, extra)
-    finally:
-        pause_ok = IS_WINDOWS and not sys.argv[1:] and sys.stdin is not None and sys.stdin.isatty()
-        if pause_ok:
-            try:
-                input("Press Enter to exit…")
-            except Exception:
-                pass
+    main()
 
-    sys.exit(exit_code)
+
+
