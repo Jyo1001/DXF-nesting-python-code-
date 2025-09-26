@@ -48,6 +48,13 @@ NEST_MODE = "bitmap"           # "bitmap" | "shelf" (shelf = simpler fallback)
 
 PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
 
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
 
@@ -55,15 +62,24 @@ SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
 import os, math
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any, TYPE_CHECKING
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
+
+from gpu_bitmap import build_mask_ops, cuda_available
+
+if TYPE_CHECKING:
+    from gpu_bitmap import TorchMaskOps
 
 # Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
 # up the repository assets without having to edit the script manually.
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
+if not BITMAP_EVAL_WORKERS:
+    cpu_count = os.cpu_count() or 1
+    BITMAP_EVAL_WORKERS = max(1, cpu_count)
 
 # ---------- tiny Windows progress window (robust prototypes) ----------
 IS_WINDOWS = (os.name == "nt")
@@ -757,22 +773,27 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
 
 # ---------- Packer: Bitmap core (exact spacing + 1px safety) ----------
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
-                     progress=None, progress_total=None, progress_prefix=""):
+                     progress=None, progress_total=None, progress_prefix="",
+                     mask_ops: Optional['TorchMaskOps'] = None):
     Wpx = max(1, int(math.ceil(W * scale)))
     Hpx = max(1, int(math.ceil(H * scale)))
     r_px = int(math.ceil(spacing * scale))  # dilation radius for spacing
     SAFETY_PX = 1                           # tiny safety to kill aliasing leaks
 
-    sheets_occ_raw  = []  # stored raw occupancy
-    sheets_occ_safe = []  # safety-extended occupancy (1px) for overlap tests
+    sheets_occ_raw: List[Any] = []  # stored raw occupancy
+    sheets_occ_safe: List[Any] = []  # safety-extended occupancy (1px) for overlap tests
     sheets_out = []
     sheets_count = 0
 
     def ensure_sheet():
         nonlocal sheets_count
         if len(sheets_occ_raw) <= sheets_count:
-            sheets_occ_raw.append(_empty_mask(Wpx, Hpx))
-            sheets_occ_safe.append(_empty_mask(Wpx, Hpx))
+            if mask_ops:
+                sheets_occ_raw.append(mask_ops.zeros(Hpx, Wpx))
+                sheets_occ_safe.append(mask_ops.zeros(Hpx, Wpx))
+            else:
+                sheets_occ_raw.append(_empty_mask(Wpx, Hpx))
+                sheets_occ_safe.append(_empty_mask(Wpx, Hpx))
             sheets_out.append([])
         return sheets_occ_raw[sheets_count], sheets_occ_safe[sheets_count], sheets_out[sheets_count]
 
@@ -797,16 +818,31 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                 p._cand_cache[key] = {'loops':loops,'raw':raw,'test':test,'shell':shell,'pw':pw,'ph':ph}
             cand = p._cand_cache[key]
 
+            if mask_ops:
+                if 'raw_tensor' not in cand:
+                    cand['raw_tensor'] = mask_ops.mask_to_tensor(cand['raw'])
+                if 'test_tensor' not in cand:
+                    cand['test_tensor'] = mask_ops.mask_to_tensor(cand['test'])
+                if 'shell_tensor' not in cand:
+                    cand['shell_tensor'] = mask_ops.mask_to_tensor(cand['shell'])
+
             attempt_sheet = sheets_count
             while True:
                 occ_raw, occ_safe, outlist = ensure_sheet()
                 # test for free spot against safety occupancy
-                pos = bl_place(occ_safe, cand['test'])
+                if mask_ops:
+                    pos = mask_ops.find_first_fit(occ_safe, cand['test_tensor'])
+                else:
+                    pos = bl_place(occ_safe, cand['test'])
                 if pos is not None:
                     xpx, ypx = pos
                     # commit: raw into raw-occ; safety-dilated shell/raw into safety-occ
-                    or_mask_inplace(occ_raw,  cand['raw'],   xpx, ypx)
-                    or_dilated_mask_inplace(occ_safe, cand['shell'], xpx, ypx, SAFETY_PX)
+                    if mask_ops:
+                        mask_ops.or_mask(occ_raw, cand['raw_tensor'], xpx, ypx)
+                        mask_ops.or_dilated(occ_safe, cand['shell_tensor'], xpx, ypx, SAFETY_PX)
+                    else:
+                        or_mask_inplace(occ_raw,  cand['raw'],   xpx, ypx)
+                        or_dilated_mask_inplace(occ_safe, cand['shell'], xpx, ypx, SAFETY_PX)
                     # record geometry in units
                     x_units = xpx / scale
                     y_units = ypx / scale
@@ -836,8 +872,14 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             w,h,loops = p.oriented(0.0, False)
             raw, pw, ph = rasterize_loops(loops, scale)
             shell = rasterize_outer_only(loops, scale)[0] if not ALLOW_NEST_IN_HOLES else raw
-            or_mask_inplace(occ_raw, raw, 0, 0)
-            or_dilated_mask_inplace(occ_safe, shell, 0, 0, SAFETY_PX)
+            if mask_ops:
+                raw_tensor = mask_ops.mask_to_tensor(raw)
+                shell_tensor = mask_ops.mask_to_tensor(shell)
+                mask_ops.or_mask(occ_raw, raw_tensor, 0, 0)
+                mask_ops.or_dilated(occ_safe, shell_tensor, 0, 0, SAFETY_PX)
+            else:
+                or_mask_inplace(occ_raw, raw, 0, 0)
+                or_dilated_mask_inplace(occ_safe, shell, 0, 0, SAFETY_PX)
             outlist.append({'sheet': sheets_count, 'loops': loops})
 
             placed_count += 1
@@ -847,10 +889,13 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     used_sheets = sheets_count + 1 if sheets_out and sheets_out[0] else len(sheets_out)
     # utilization metric (raw pixels)
-    fill_pixels = 0
-    for occ in sheets_occ_raw:
-        for row in occ:
-            fill_pixels += sum(1 for v in row if v)
+    if mask_ops:
+        fill_pixels = sum(mask_ops.count_true(occ) for occ in sheets_occ_raw)
+    else:
+        fill_pixels = 0
+        for occ in sheets_occ_raw:
+            for row in occ:
+                fill_pixels += sum(1 for v in row if v)
 
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
@@ -969,7 +1014,8 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
 
 # ---------- Bitmap multi-try ----------
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
-                      tries: int, seed: Optional[int], progress=None):
+                      tries: int, seed: Optional[int], progress=None,
+                      mask_ops: Optional['TorchMaskOps'] = None):
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
     rnd = Random(seed) if seed is not None else Random()
@@ -996,9 +1042,10 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
-                                      progress_prefix=prefix)
+                                      progress_prefix=prefix,
+                                      mask_ops=mask_ops)
         else:
-            result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None)
+            result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None, mask_ops=mask_ops)
         cache[key] = result
         return result
 
@@ -1203,17 +1250,39 @@ def main():
         prog.update("Nothing to nest.\nNo usable closed profiles were found.")
         prog.close(); return
 
+    mask_ops: Optional['TorchMaskOps'] = None
+    accel_note = "Acceleration: CPU bitmap evaluator"
+    using_cuda = False
+    device_pref = BITMAP_DEVICE.strip() if BITMAP_DEVICE else None
+    if NEST_MODE.lower() == "bitmap":
+        mask_ops = build_mask_ops(device_pref)
+        if mask_ops:
+            device_desc = f"{mask_ops.device}"
+            if getattr(mask_ops.device, "type", "") == "cuda":
+                using_cuda = True
+                accel_note = f"Acceleration: CUDA GPU ({device_desc}) via PyTorch"
+            else:
+                accel_note = f"Acceleration: PyTorch device {device_desc}"
+            log(f"[INFO] Bitmap accelerator active on {device_desc}.")
+        else:
+            if device_pref:
+                log(f"[WARN] Requested Torch device '{device_pref}' is unavailable; using CPU bitmaps.")
+            elif cuda_available():
+                log("[WARN] CUDA runtime detected but PyTorch is unavailable; using CPU bitmaps.")
+
     prog.update(f"Starting nesting… {len(parts)} parts\nMode: {NEST_MODE}, Tries: {SHUFFLE_TRIES}")
 
     if NEST_MODE.lower()=="bitmap":
         if SHUFFLE_TRIES>1:
             placements, sheets = pack_bitmap_multi(parts, W_eff, H_eff, SPACING, PIXELS_PER_UNIT,
                                                    SHUFFLE_TRIES, SHUFFLE_SEED,
-                                                   progress=prog.update)
+                                                   progress=prog.update,
+                                                   mask_ops=mask_ops)
         else:
             placements, sheets = pack_bitmap_core(parts, W_eff, H_eff, SPACING, PIXELS_PER_UNIT,
                                                   progress=prog.update,
-                                                  progress_total=len(parts))[:2]
+                                                  progress_total=len(parts),
+                                                  mask_ops=mask_ops)[:2]
     else:
         placements, sheets = pack_shelves(parts, W_eff, H_eff, SPACING)
 
@@ -1242,6 +1311,10 @@ def main():
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
     _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
     _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
+    _report_lines.append(accel_note)
+    if using_cuda:
+        _report_lines.append("GPU acceleration engaged: NVIDIA CUDA device utilized for bitmap placement.")
+    _report_lines.append("")
 
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
@@ -1319,6 +1392,11 @@ if __name__ == "__main__":
         help="Number of worker processes used for bitmap evaluation (bitmap mode).",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1362,6 +1440,7 @@ if __name__ == "__main__":
     SHUFFLE_TRIES = max(1, int(args.tries))
     SHUFFLE_SEED = args.seed
     BITMAP_EVAL_WORKERS = args.workers
+    BITMAP_DEVICE = args.device
     ALLOW_MIRROR = args.allow_mirror
     ALLOW_NEST_IN_HOLES = args.allow_holes
     RECT_ALIGN_MODE = args.rect_align
