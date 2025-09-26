@@ -9,6 +9,9 @@
 # - Shows a tiny progress window (Win32 via ctypes) — no tkinter required
 
 # ======= SETTINGS =======
+# NOTE: The folder defaults to the sample DXFs that ship with the repository when
+# available.  On Windows the original absolute path is left as a fallback so the
+# script behaves the same when copied back to its source environment.
 FOLDER = r"C:\Users\Jsudhakaran\OneDrive - GN Corporation Inc\Desktop\test\For waterjet cutting"
 
 # Sheet (inches)
@@ -26,9 +29,11 @@ ARC_CHORD_TOL = 0.01    # arc flattening chord tolerance (smaller = more segment
 
 # Behaviors
 FALLBACK_OPEN_AS_BBOX = True   # if no closed loops, use overall DXF bbox as a rectangle
+
 ALLOW_ROTATE_90       = True
 ALLOW_MIRROR          = False  # allow mirrored placements (flip across Y axis)
 USE_OBB_CANDIDATE     = True   # try oriented bounding box angles too
+
 INSUNITS = 1                   # 1=inches, 4=mm (stored in DXF header; advisory only)
 
 # Rectangle orientation preference: "off" | "prefer" | "force"
@@ -40,16 +45,25 @@ ALLOW_NEST_IN_HOLES = True     # True: allow part-in-hole. False: holes are bloc
 
 # Nesting engine
 NEST_MODE = "bitmap"           # "bitmap" | "shelf" (shelf = simpler fallback)
+
 PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
 
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
+
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
 
 import os, math
 from typing import List, Tuple, Dict, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from random import Random
+
+# Detect a co-located sample folder so out-of-the-box runs on Linux/macOS pick
+# up the repository assets without having to edit the script manually.
+_REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
+if os.path.isdir(_REPO_SAMPLE_FOLDER):
+    FOLDER = _REPO_SAMPLE_FOLDER
 
 # ---------- tiny Windows progress window (robust prototypes) ----------
 IS_WINDOWS = (os.name == "nt")
@@ -440,6 +454,7 @@ def bbox_of_loops(loops: List[Loop]):
     pts=[p for lp in loops for p in lp]
     return bbox_of_points(pts) if pts else (0,0,0,0)
 
+
 def translate_loop(loop: Loop, dx: float, dy: float) -> Loop:
     return [(x+dx,y+dy) for x,y in loop]
 
@@ -454,6 +469,7 @@ def rotate_loop(loop: Loop, theta: float) -> Loop:
     rot=[(x*c - y*s, x*s + y*c) for x,y in loop]
     minx=min(x for x,_ in rot); miny=min(y for _,y in rot)
     return [(x-minx,y-miny) for x,y in rot]
+
 
 def convex_hull(points: List[Point]) -> List[Point]:
     pts=sorted(set(points))
@@ -496,6 +512,7 @@ def split_outer_and_holes(loops: List[Loop]):
     return loops[idx], [loops[i] for i in range(len(loops)) if i!=idx]
 
 # ---------- Part ----------
+
 class Part:
     _uid_counter = 0
 
@@ -504,10 +521,12 @@ class Part:
             minx,miny,maxx,maxy=bbox_of_loops(loops)
             loops0=[translate_loop(lp,-minx,-miny) for lp in loops]
         elif fallback_bbox is not None:
+
             minx,miny,maxx,maxy=fallback_bbox
             loops0=[[ (0,0),(maxx-minx,0),(maxx-minx,maxy-miny),(0,maxy-miny),(0,0) ]]
         else:
             loops0=[]
+
         self.name=name
         if not loops0:
             self.outer=None; self.holes=[]; self.w=self.h=0.0; self.obb_w=self.obb_h=self.obb_theta=0.0; return
@@ -526,6 +545,7 @@ class Part:
         loops_r=[rotate_loop(lp, theta) for lp in [self.outer]+self.holes]
         minx,miny,maxx,maxy=bbox_of_loops([loops_r[0]])
         return (maxx-minx),(maxy-miny),loops_r
+
 
 
     def _axis_align_angles(self):
@@ -551,6 +571,34 @@ class Part:
             if all(abs((a-b)%(math.pi))>math.radians(1) for b in out):
                 out.append(a)
         return out
+
+    def clone_for_worker(self) -> 'Part':
+        clone = Part.__new__(Part)
+        clone.name = self.name
+        clone.outer = self.outer
+        clone.holes = self.holes
+        clone.w = self.w
+        clone.h = self.h
+        clone.obb_w = self.obb_w
+        clone.obb_h = self.obb_h
+        clone.obb_theta = self.obb_theta
+        clone._cand_cache = {}
+        clone.uid = self.uid
+        return clone
+
+    def candidate_poses(self):
+        angles = self.candidate_angles()
+        mirrors = [False, True] if ALLOW_MIRROR else [False]
+        seen = set()
+        poses = []
+        for mirror in mirrors:
+            for ang in angles:
+                key = (mirror, round((ang % (2*math.pi)), 10))
+                if key in seen:
+                    continue
+                seen.add(key)
+                poses.append((ang, mirror))
+        return poses
 
     def candidate_poses(self):
         angles = self.candidate_angles()
@@ -732,6 +780,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
     total_parts = progress_total if progress_total is not None else len(ordered_parts)
 
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
@@ -747,6 +796,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     shell = raw
                 p._cand_cache[key] = {'loops':loops,'raw':raw,'test':test,'shell':shell,'pw':pw,'ph':ph}
             cand = p._cand_cache[key]
+
             attempt_sheet = sheets_count
             while True:
                 occ_raw, occ_safe, outlist = ensure_sheet()
@@ -778,6 +828,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
                     if sheets_count > attempt_sheet + 25:
                         break
             if placed: break
+
         if not placed:
             # last resort: drop at (0,0) of a fresh sheet
             sheets_count += 1
@@ -788,6 +839,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             or_mask_inplace(occ_raw, raw, 0, 0)
             or_dilated_mask_inplace(occ_safe, shell, 0, 0, SAFETY_PX)
             outlist.append({'sheet': sheets_count, 'loops': loops})
+
             placed_count += 1
             if progress:
                 progress(f"{progress_prefix}Forced place on new sheet {sheets_count+1}\n"
@@ -799,6 +851,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
     for occ in sheets_occ_raw:
         for row in occ:
             fill_pixels += sum(1 for v in row if v)
+
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
@@ -1018,6 +1071,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
     final_result = evaluate(final_order, allow_progress=True, prefix="Final pass\n", use_scale=scale)
     return final_result[0], final_result[1]
 
+
 # ---------- Shelf fallback ----------
 def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
     parts=sorted([p for p in parts if p.outer is not None],
@@ -1029,6 +1083,7 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
         sheet+=1; shelf_y=0.0; shelf_h=0.0; cursor_x=0.0
     for p in parts:
         cands=[]
+
         for ang, mirror in p.candidate_poses():
             w,h,_=p.oriented(ang, mirror)
             cands.append((ang, mirror, w, h))
@@ -1060,6 +1115,7 @@ def pack_shelves(parts: List['Part'], W: float, H: float, spacing: float):
             _,_,loops = p.oriented(0.0, False)
             placements.append({'sheet':sheet,'loops':[[(x,y) for x,y in lp] for lp in loops]})
             cursor_x = p.w + spacing; shelf_h = p.h + spacing
+
     sheets_used=(max((pl['sheet'] for pl in placements), default=-1))+1
     return placements, sheets_used
 
@@ -1178,6 +1234,7 @@ def main():
     _report_lines.append(f"Mode: {NEST_MODE}")
     _report_lines.append(f"Sheets: {sheets}")
     _report_lines.append(f"Margin: {SHEET_MARGIN}")
+
     _report_lines.append(f"Spacing: {SPACING}")
     _report_lines.append(f"Resolution: {PIXELS_PER_UNIT} px/unit")
     _report_lines.append(f"Shuffle tries: {SHUFFLE_TRIES}{'' if SHUFFLE_SEED is None else f' (seed {SHUFFLE_SEED})'}")
@@ -1185,6 +1242,7 @@ def main():
     _report_lines.append(f"Rect-align mode: {RECT_ALIGN_MODE}")
     _report_lines.append(f"Allow mirror: {ALLOW_MIRROR}")
     _report_lines.append(f"Allow nest in holes: {ALLOW_NEST_IN_HOLES}")
+
     try:
         with open(report_path, "w", encoding="utf-8") as rf:
             rf.write("\n".join(_report_lines))
@@ -1200,4 +1258,112 @@ def main():
     except: pass
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Nest DXF parts onto rectangular sheets using bitmap search."
+    )
+    parser.add_argument(
+        "--folder",
+        default=FOLDER,
+        help="Directory containing DXF files and optional quantity TXT files.",
+    )
+    parser.add_argument(
+        "--sheet",
+        nargs=2,
+        metavar=("WIDTH", "HEIGHT"),
+        type=float,
+        default=(SHEET_W, SHEET_H),
+        help="Sheet size in drawing units (width height).",
+    )
+    parser.add_argument(
+        "--margin",
+        type=float,
+        default=SHEET_MARGIN,
+        help="Border margin to keep empty around each sheet.",
+    )
+    parser.add_argument(
+        "--spacing",
+        type=float,
+        default=SPACING,
+        help="Minimum spacing to keep between parts.",
+    )
+    parser.add_argument(
+        "--nest-mode",
+        choices=["bitmap", "shelf"],
+        default=NEST_MODE,
+        help="Select the nesting strategy.",
+    )
+    parser.add_argument(
+        "--pixels-per-unit",
+        type=int,
+        default=PIXELS_PER_UNIT,
+        help="Bitmap resolution used for placement evaluation.",
+    )
+    parser.add_argument(
+        "--tries",
+        type=int,
+        default=SHUFFLE_TRIES,
+        help="Number of shuffle tries to explore different part orders.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=SHUFFLE_SEED,
+        help="Optional RNG seed for repeatable shuffles.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=BITMAP_EVAL_WORKERS,
+        help="Number of worker processes used for bitmap evaluation (bitmap mode).",
+    )
+    parser.add_argument(
+        "--allow-mirror",
+        dest="allow_mirror",
+        action="store_true",
+        default=ALLOW_MIRROR,
+        help="Enable mirrored placements when searching for fits.",
+    )
+    parser.add_argument(
+        "--no-mirror",
+        dest="allow_mirror",
+        action="store_false",
+        help="Disable mirrored placements.",
+    )
+    parser.add_argument(
+        "--allow-hole-nesting",
+        dest="allow_holes",
+        action="store_true",
+        default=ALLOW_NEST_IN_HOLES,
+        help="Allow parts to be placed inside other parts' holes.",
+    )
+    parser.add_argument(
+        "--forbid-hole-nesting",
+        dest="allow_holes",
+        action="store_false",
+        help="Disallow parts being nested within holes.",
+    )
+    parser.add_argument(
+        "--rect-align",
+        choices=["off", "prefer", "force"],
+        default=RECT_ALIGN_MODE,
+        help="Control rectangle alignment heuristics.",
+    )
+
+    args = parser.parse_args()
+
+    FOLDER = os.path.abspath(args.folder)
+    SHEET_W, SHEET_H = map(float, args.sheet)
+    SHEET_MARGIN = float(args.margin)
+    SPACING = float(args.spacing)
+    NEST_MODE = args.nest_mode
+    PIXELS_PER_UNIT = max(1, int(args.pixels_per_unit))
+    SHUFFLE_TRIES = max(1, int(args.tries))
+    SHUFFLE_SEED = args.seed
+    BITMAP_EVAL_WORKERS = args.workers
+    ALLOW_MIRROR = args.allow_mirror
+    ALLOW_NEST_IN_HOLES = args.allow_holes
+    RECT_ALIGN_MODE = args.rect_align
+
     main()
