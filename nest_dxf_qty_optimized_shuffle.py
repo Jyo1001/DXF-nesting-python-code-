@@ -59,6 +59,13 @@ BITMAP_DEVICE = None  # type: Optional[str]
 # lets the script auto-detect the CPU count once ``os`` is available.
 BITMAP_EVAL_WORKERS = None
 
+# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
+BITMAP_DEVICE = None  # type: Optional[str]
+
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
 
 
 # Multi-try randomization (bitmap only)
@@ -66,6 +73,7 @@ SHUFFLE_TRIES = 5
 
 SHUFFLE_SEED  = None           # int for reproducibility, or None
 # ========================
+
 
 
 import os, math
@@ -80,6 +88,7 @@ from random import Random
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
 
 
 if not BITMAP_EVAL_WORKERS:
@@ -283,6 +292,34 @@ _report_lines: List[str] = []
 def log(line: str):
     print(line)
     _report_lines.append(line)
+
+
+def _write_report(folder: str, extra_lines: Optional[List[str]] = None) -> Optional[str]:
+    """Persist the accumulated log/report lines.
+
+    The report normally lives alongside the DXFs, but if that directory is
+    unavailable we fall back to the script directory so errors are still
+    captured when the script exits early.
+    """
+
+    target_dir = folder if folder and os.path.isdir(folder) else os.path.dirname(os.path.abspath(__file__))
+    report_path = os.path.join(target_dir, "nest_report.txt")
+
+    payload: List[str] = ["=== Nesting Report ==="]
+    payload.extend(_report_lines)
+    if extra_lines:
+        if payload and payload[-1] != "":
+            payload.append("")
+        payload.extend(extra_lines)
+
+    try:
+        with open(report_path, "w", encoding="utf-8") as rf:
+            rf.write("\n".join(payload) + "\n")
+    except Exception as exc:
+        print(f"[WARN] Could not write report: {exc}")
+        return None
+
+    return report_path
 
 Point = Tuple[float,float]
 Loop  = List[Point]
@@ -778,6 +815,7 @@ def or_dilated_mask_inplace(occ, raw_mask, ox, oy, r):
 
 # ---------- Packer: Bitmap core (exact spacing + 1px safety) ----------
 
+
 def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                      progress=None, progress_total=None, progress_prefix="",
                      mask_ops: Optional['TorchMaskOps'] = None):
@@ -809,10 +847,12 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
 
 
+
     for p in ordered_parts:
         placed = False
         for ang in p.candidate_angles():
             key = (scale, ang)
+
 
             if key not in p._cand_cache:
                 w,h,loops = p.oriented(ang)
@@ -875,6 +915,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
             if placed: break
 
 
+
         if not placed:
             # last resort: drop at (0,0) of a fresh sheet
             sheets_count += 1
@@ -910,6 +951,7 @@ def pack_bitmap_core(ordered_parts: List['Part'], W: float, H: float, spacing: f
 
     placements = [{'sheet': i, 'loops': pl['loops']} for i, out in enumerate(sheets_out) for pl in out]
     return placements, used_sheets, fill_pixels
+
 
 
 # ---------- Bitmap order optimization helpers ----------
@@ -1025,9 +1067,11 @@ def _anneal_order(initial_order: List['Part'], evaluate_fn, rnd: Random, sheet_p
 
 # ---------- Bitmap multi-try ----------
 
+
 def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, scale: int,
                       tries: int, seed: Optional[int], progress=None,
                       mask_ops: Optional['TorchMaskOps'] = None):
+
 
     base = [p for p in parts if p.outer is not None]
     base.sort(key=lambda p: abs(polygon_area(p.outer)), reverse=True)
@@ -1053,6 +1097,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
             return cache[key]
         if allow_progress and progress:
 
+
             result = pack_bitmap_core(order, W, H, spacing, use_scale,
                                       progress=progress,
                                       progress_total=total_parts,
@@ -1060,6 +1105,7 @@ def pack_bitmap_multi(parts: List['Part'], W: float, H: float, spacing: float, s
                                       mask_ops=mask_ops)
         else:
             result = pack_bitmap_core(order, W, H, spacing, use_scale, progress=None, mask_ops=mask_ops)
+
 
         cache[key] = result
         return result
@@ -1217,19 +1263,26 @@ def main():
 
     if not os.path.isdir(FOLDER):
         log(f"[ERROR] Folder not found: {FOLDER}")
-        prog.update("Folder not found.\nCheck FOLDER path in the script."); prog.close(); return
+        prog.update("Folder not found.\nCheck FOLDER path in the script.")
+        _write_report(FOLDER, ["Status: failed (folder not found)"])
+        prog.close(); return
 
     dxf_files = sorted([f for f in os.listdir(FOLDER)
                         if f.lower().endswith(".dxf") and f.lower() != "nested.dxf"])
     if not dxf_files:
         log(f"[WARN] No .dxf files found in: {FOLDER}")
-        prog.update("No .dxf files found.\nAdd DXFs to the folder and rerun."); prog.close(); return
+        prog.update("No .dxf files found.\nAdd DXFs to the folder and rerun.")
+        _write_report(FOLDER, ["Status: aborted (no DXFs found)"])
+        prog.close(); return
 
     W_eff = SHEET_W - 2*SHEET_MARGIN
     H_eff = SHEET_H - 2*SHEET_MARGIN
     if W_eff <= 0 or H_eff <= 0:
         msg = f"[ERROR] SHEET_MARGIN={SHEET_MARGIN} leaves no usable area on a {SHEET_W}×{SHEET_H} sheet."
-        log(msg); prog.update(msg); prog.close(); return
+        log(msg)
+        prog.update(msg)
+        _write_report(FOLDER, ["Status: failed (invalid sheet margin)"])
+        prog.close(); return
 
     parts: List[Part] = []
     skipped = 0
@@ -1259,6 +1312,7 @@ def main():
         qty = read_qty_for_dxf(FOLDER, fn)
         for _ in range(qty):
             parts.append(p)
+
 
 
     if not parts:
@@ -1349,6 +1403,7 @@ def main():
     try: os.startfile(report_path)
     except: pass
 
+
 if __name__ == "__main__":
     import argparse
 
@@ -1421,6 +1476,11 @@ if __name__ == "__main__":
         help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
     )
     parser.add_argument(
+        "--device",
+        default=BITMAP_DEVICE,
+        help="Optional PyTorch device string for bitmap acceleration (e.g., 'cuda', 'cuda:0', 'cpu').",
+    )
+    parser.add_argument(
         "--allow-mirror",
         dest="allow_mirror",
         action="store_true",
@@ -1453,6 +1513,7 @@ if __name__ == "__main__":
         help="Control rectangle alignment heuristics.",
     )
 
+
     args = parser.parse_args()
 
     FOLDER = os.path.abspath(args.folder)
@@ -1472,3 +1533,4 @@ if __name__ == "__main__":
     RECT_ALIGN_MODE = args.rect_align
 
     main()
+
