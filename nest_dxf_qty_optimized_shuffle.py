@@ -48,6 +48,10 @@ NEST_MODE = "bitmap"           # "bitmap" | "shelf" (shelf = simpler fallback)
 
 PIXELS_PER_UNIT = 20           # ↑ = tighter/more accurate (slower)
 
+# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
+# lets the script auto-detect the CPU count once ``os`` is available.
+BITMAP_EVAL_WORKERS = None
+
 # Multi-try randomization (bitmap only)
 SHUFFLE_TRIES = 5
 
@@ -64,6 +68,10 @@ from random import Random
 _REPO_SAMPLE_FOLDER = os.path.join(os.path.dirname(__file__), "For waterjet cutting")
 if os.path.isdir(_REPO_SAMPLE_FOLDER):
     FOLDER = _REPO_SAMPLE_FOLDER
+
+if not BITMAP_EVAL_WORKERS:
+    cpu_count = os.cpu_count() or 1
+    BITMAP_EVAL_WORKERS = max(1, cpu_count)
 
 # ---------- tiny Windows progress window (robust prototypes) ----------
 IS_WINDOWS = (os.name == "nt")
