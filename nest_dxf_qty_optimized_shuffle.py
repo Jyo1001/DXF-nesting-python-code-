@@ -55,31 +55,6 @@ BITMAP_EVAL_WORKERS = None
 # Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
 BITMAP_DEVICE = None  # type: Optional[str]
 
-# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
-# lets the script auto-detect the CPU count once ``os`` is available.
-BITMAP_EVAL_WORKERS = None
-
-# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
-BITMAP_DEVICE = None  # type: Optional[str]
-
-# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
-# lets the script auto-detect the CPU count once ``os`` is available.
-BITMAP_EVAL_WORKERS = None
-
-# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
-BITMAP_DEVICE = None  # type: Optional[str]
-
-# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
-# lets the script auto-detect the CPU count once ``os`` is available.
-BITMAP_EVAL_WORKERS = None
-
-# Optional PyTorch device string for the bitmap accelerator ("cuda", "cuda:0", "cpu", etc.).
-BITMAP_DEVICE = None  # type: Optional[str]
-
-# Worker processes used by the bitmap evaluator.  Leaving this at ``None``
-# lets the script auto-detect the CPU count once ``os`` is available.
-BITMAP_EVAL_WORKERS = None
-
 
 
 # Multi-try randomization (bitmap only)
